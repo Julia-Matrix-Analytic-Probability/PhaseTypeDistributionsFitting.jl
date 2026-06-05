@@ -106,6 +106,52 @@ const PTDF = PhaseTypeDistributionsFitting
         end
     end
 
+    @testset "fitted parameters are FixedSparsity with the right pattern" begin
+        rng = StableRNG(40)
+        data = rand(rng, HyperExponentialDist([0.5, 0.5], [1.0, 0.3]), 1500)
+
+        @testset "EMResult carries FixedSparsity α and T" begin
+            α0, T0 = PTDF.coxian_init(3, data; rng = StableRNG(41))
+            res = PTDF._em(α0, T0, data; maxiter = 100, tol = 1e-9)
+            @test res.α isa FixedSparsityVector
+            @test res.T isa FixedSparsityMatrix
+            # Coxian structure inferred from the (structured) init.
+            @test Vector(pattern(res.α)) == Bool[1, 0, 0]
+            @test Matrix(pattern(res.T)) == Bool[1 1 0; 0 1 1; 0 0 1]
+        end
+
+        @testset "structured PHDist fit locks the pattern at the type level" begin
+            cox = fit_mle(CoxianDist, data; m = 3)
+            phd = fit_mle(PHDist, data; init = cox)   # init from a Coxian
+            T = subgenerator(phd)
+            a = initial_prob(phd)
+            @test T isa FixedSparsityMatrix
+            @test a isa FixedSparsityVector
+            @test Vector(pattern(a)) == Bool[1, 0, 0]
+            @test Matrix(pattern(T)) == Bool[1 1 0; 0 1 1; 0 0 1]
+            # Off-pattern writes throw; in-pattern writes are allowed.
+            @test_throws ArgumentError a[2] = 0.3
+            @test_throws ArgumentError T[3, 1] = 0.5
+            @test (T[1, 2] = 0.7) == 0.7
+        end
+
+        @testset "a general (dense-init) PHDist fit has a full pattern" begin
+            phd = fit_mle(PHDist, data; m = 3)
+            @test all(pattern(subgenerator(phd)))     # every entry free
+            @test all(pattern(initial_prob(phd)))
+        end
+
+        @testset "exit-vector zeros are enforced (hypoexponential init)" begin
+            # Absorption only from the last phase: t⁰ = [0, 0, λ]. Fitting a
+            # *general* PHDist from a hypo init must keep those exit zeros.
+            phd = fit_mle(PHDist, data; init = HypoExponentialDist([1.0, 2.0, 3.0]))
+            t0 = exit_rates(phd)
+            @test t0[1] == 0.0
+            @test t0[2] == 0.0
+            @test t0[3] > 0.0
+        end
+    end
+
     @testset "recovery of a hyperexponential (moment-level)" begin
         rng = StableRNG(5)
         truth = HyperExponentialDist([0.7, 0.3], [1.0, 0.2])  # mean 2.2, SCV > 1

@@ -30,24 +30,26 @@ function _safe_alpha(α::AbstractVector{<:Real})
 end
 
 # Obtain the starting (α, T) for an EM run from either an explicit `init`
-# distribution (whose sparsity pattern is preserved) or a structure-specific
-# initializer `initfn(m, data; rng)`.
+# distribution or a structure-specific initializer `initfn(m, data; rng)`. For an
+# `init` distribution the FixedSparsity α/T of the resulting `PHDist` are returned
+# directly, so the EM picks up its exact sparsity pattern (see `_em`).
 function _starting_point(initfn, m, init, data, rng)
     if init !== nothing
         phd = PHDist(init)            # accepts any AbstractPHDist; keeps its zeros
         m === nothing || m == nphases(phd) ||
             throw(ArgumentError("m=$m conflicts with init of size $(nphases(phd))"))
-        return collect(Float64, initial_prob(phd)), Matrix{Float64}(subgenerator(phd))
+        return initial_prob(phd), subgenerator(phd)
     end
     m === nothing && throw(ArgumentError("provide either `m` (number of phases) or `init`"))
     return initfn(m, data; rng=rng)
 end
 
 # ---- reconstruction of structured types from a fitted (α, T) ----
-# These assume the EM preserved the family's structure (it does, by zero
-# preservation); clamps guard only against floating-point drift.
+# `α`/`T` arrive as FixedSparsity arrays from the EM; these read through the
+# standard AbstractArray interface. The EM preserved the family's structure (by
+# the pattern-aware M-step), so clamps guard only against floating-point drift.
 
-function _to_coxian(α::Vector{Float64}, T::Matrix{Float64})
+function _to_coxian(α::AbstractVector{<:Real}, T::AbstractMatrix{<:Real})
     m = length(α)
     rates = -diag(T)
     all(rates .> 0) || throw(ArgumentError("fitted Coxian has a non-positive rate: $rates"))
@@ -56,13 +58,13 @@ function _to_coxian(α::Vector{Float64}, T::Matrix{Float64})
     return CoxianDist(rates, exit_probs)
 end
 
-function _to_hyper(α::Vector{Float64}, T::Matrix{Float64})
+function _to_hyper(α::AbstractVector{<:Real}, T::AbstractMatrix{<:Real})
     rates = -diag(T)
     all(rates .> 0) || throw(ArgumentError("fitted hyperexponential has a non-positive rate: $rates"))
     return HyperExponentialDist(_safe_alpha(α), rates)
 end
 
-function _to_hypo(α::Vector{Float64}, T::Matrix{Float64})
+function _to_hypo(α::AbstractVector{<:Real}, T::AbstractMatrix{<:Real})
     rates = -diag(T)
     all(rates .> 0) || throw(ArgumentError("fitted hypoexponential has a non-positive rate: $rates"))
     return HypoExponentialDist(rates)
@@ -81,9 +83,10 @@ MAPH EM). Provide the number of phases `m` for a dense random start, or an `init
 distribution (any `AbstractPHDist`) — in which case the **sparsity pattern of
 `init` is preserved**, so explicit zeros stay zero throughout the fit.
 
-Returns a `PHDist`. Phase-type distributions are not identifiable, so compare
-fits by moments or CDF (`moments_isapprox`, `distribution_isapprox`) rather than
-by `(α, T)` directly.
+Returns a `PHDist` whose `α` and `T` are `FixedSparsity` arrays carrying the
+preserved sparsity pattern. Phase-type distributions are not identifiable, so
+compare fits by moments or CDF (`moments_isapprox`, `distribution_isapprox`)
+rather than by `(α, T)` directly.
 """
 function Distributions.fit_mle(::Type{PHDist}, data::AbstractVector{<:Real};
                                m::Union{Integer,Nothing}=nothing, init=nothing,
@@ -92,7 +95,11 @@ function Distributions.fit_mle(::Type{PHDist}, data::AbstractVector{<:Real};
     _check_data(data)
     α0, T0 = _starting_point(default_init, m, init, data, rng)
     res = _em(α0, T0, data; maxiter=maxiter, tol=tol, verbose=verbose)
-    return PHDist(_safe_alpha(res.α), res.T)
+    # Renormalise α by scalar division so its FixedSparsity pattern is preserved;
+    # PHDist then keeps both α's and T's patterns (see PHDist's _phpattern).
+    s = sum(res.α)
+    s > 0 || throw(ArgumentError("fitted α summed to $s; cannot normalise"))
+    return PHDist(res.α / s, res.T)
 end
 
 """

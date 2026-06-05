@@ -5,6 +5,7 @@ using Random
 using Statistics
 using Distributions
 using PhaseTypeDistributions
+using FixedSparsityMatrices: FixedSparsityVector, FixedSparsityMatrix, pattern
 
 # Extend the Distributions.jl fitting interface rather than shadowing it.
 import Distributions: fit, fit_mle
