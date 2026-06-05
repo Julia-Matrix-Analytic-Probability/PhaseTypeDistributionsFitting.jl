@@ -184,4 +184,31 @@ const PTDF = PhaseTypeDistributionsFitting
         @test_throws ArgumentError fit(PHDist, data; method = :bogus, m = 2)
     end
 
+    @testset "m / init consistency" begin
+        rng = StableRNG(7)
+        data = rand(rng, Exponential(1.0), 500)
+        # m disagreeing with the init's size is an error.
+        @test_throws ArgumentError fit_mle(PHDist, data;
+                                           m = 2, init = CoxianDist([1.0, 2.0, 3.0], [0.3, 0.4]))
+        # m agreeing with the init's size is fine (and m is then redundant).
+        fit = fit_mle(PHDist, data; m = 3, init = CoxianDist([1.0, 2.0, 3.0], [0.3, 0.4]))
+        @test nphases(fit) == 3
+    end
+
+    @testset "Erlang shape validation" begin
+        @test_throws ArgumentError fit_mle(ErlangPHDist, [1.0, 2.0]; m = 0)
+        @test_throws ArgumentError fit_mle(ErlangPHDist, [1.0, 2.0]; m = -1)
+    end
+
+    @testset "EM reports convergence on easy data" begin
+        rng = StableRNG(8)
+        data = rand(rng, Exponential(2.0), 3000)
+        # A 1-phase fit converges in a couple of iterations, well within maxiter.
+        res = PTDF._em([1.0], reshape([-1.0], 1, 1), data; maxiter = 100, tol = 1e-9)
+        @test res.converged
+        @test res.iterations < 100
+        # The fitted single rate is 1 / mean(data).
+        @test Matrix(res.T)[1, 1] ≈ -1 / mean(data) rtol = 1e-6
+    end
+
 end

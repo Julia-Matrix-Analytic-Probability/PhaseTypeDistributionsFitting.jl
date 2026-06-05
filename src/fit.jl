@@ -78,8 +78,8 @@ end
     fit_mle(PHDist, data; m, init, maxiter=1000, tol=1e-7, verbose=false, rng)
 
 Fit a general phase-type distribution to positive observations `data` by maximum
-likelihood using the EM algorithm (Asmussen–Nerman–Olsson; the n=1 case of the
-MAPH EM). Provide the number of phases `m` for a dense random start, or an `init`
+likelihood using the EM algorithm (Asmussen–Nerman–Olsson). Provide the number
+of phases `m` for a dense random start, or an `init`
 distribution (any `AbstractPHDist`) — in which case the **sparsity pattern of
 `init` is preserved**, so explicit zeros stay zero throughout the fit.
 

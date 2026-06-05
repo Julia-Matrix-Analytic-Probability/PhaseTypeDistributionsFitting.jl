@@ -1,8 +1,7 @@
 # Core EM engine for phase-type distributions.
 #
 # This implements the classic Asmussen–Nerman–Olsson EM algorithm for fitting a
-# PH(α, T) distribution to fully-observed absorption times x₁, …, x_L. It is the
-# n = 1 special case of the MAPH EM in the accompanying paper.
+# PH(α, T) distribution to fully-observed absorption times x₁, …, x_L.
 #
 # The E-step computes the *exact* expected sufficient statistics using a Van Loan
 # block-matrix exponential, rather than quadrature or ODE integration. For a PH

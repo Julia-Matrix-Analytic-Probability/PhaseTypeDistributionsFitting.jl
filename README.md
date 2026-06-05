@@ -120,8 +120,8 @@ An earlier Julia package for PH-EM is
 [EMpht.jl](https://github.com/Pat-Laub/EMpht.jl), a port of Asmussen's
 `EMpht.c`. PhaseTypeDistributionsFitting.jl supersedes it in scope (PH and MAPH,
 integrated with Distributions.jl via PhaseTypeDistributions.jl) and in active
-maintenance. We borrow ideas freely (uniformization-based E-step, structured-PH
-parameterizations, censoring) and credit them as we go.
+maintenance. We draw on its ideas freely (structured-PH parameterizations,
+censoring) and credit them as we go.
 
 ## Accompanying Paper
 
