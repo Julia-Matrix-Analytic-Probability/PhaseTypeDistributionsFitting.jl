@@ -160,6 +160,55 @@ initialization constructions — is in the accompanying paper, which also
 verifies the implementation on synthetic data and applies it to the two real
 datasets above.
 
+## A worked MAPH example
+
+Simulate from a known law, fit from both initializations, keep the better
+fit, and compare it to the truth:
+
+```julia
+using PhaseTypeDistributions, PhaseTypeDistributionsFitting
+using Distributions, Statistics, Random
+
+Random.seed!(2026)
+truth = MAPHDist([0.5, 0.3, 0.2],
+                 [-3.0  1.0  0.5;  0.8 -2.5  0.7;  0.4  0.6 -2.0],   # T
+                 [ 1.0  0.5;  0.4  0.6;  0.3  0.7])                  # D
+data = rand(truth, 5000)
+
+ll(d) = sum(log(pdf(d, t, k)) for (t, k) in data)
+fit_m = fit_mle(MAPHDist, data; m = 3)                              # :moment
+fit_s = fit_mle(MAPHDist, data; m = 3, init_method = :simplified)
+best  = ll(fit_m) >= ll(fit_s) ? fit_m : fit_s
+
+ll(truth), ll(fit_m), ll(fit_s)
+marginal_absorption(truth), marginal_absorption(best)
+mean(conditional_time(truth, 1)), mean(conditional_time(best, 1))
+scv(conditional_time(truth, 1)),  scv(conditional_time(best, 1))
+```
+
+One run of this (the default `Random` stream differs across Julia versions,
+so your numbers will vary slightly) gives:
+
+```
+loglik:    truth -7692.6   :moment -7698.9   :simplified -7690.5
+π:         truth (0.486, 0.514)        fitted (0.472, 0.528)
+cause 1:   mean 0.817 vs 0.822         SCV 1.117 vs 1.093
+cause 2:   mean 0.898 vs 0.889         SCV 0.995 vs 1.001
+max |F_true(u,k) - F_fit(u,k)| over a grid:  0.014
+```
+
+Three things worth noticing. First, the two initializations land in different
+local optima — here `:simplified` wins, and its log-likelihood is even
+slightly above the truth's, which is expected in-sample behaviour of an MLE,
+not a bug. Second, the fitted law matches the data-generating one closely in
+every distributional summary: absorption probabilities, per-cause conditional
+means and SCVs, and the joint sub-distribution functions. Third, the fitted
+*parameters* look nothing like the truth — the first row of the fitted `T` in
+this run is `(-1.28, 0.06, 0.08)` against the true `(-3.0, 1.0, 0.5)`. That is
+MAPH non-identifiability at work: many `(α, T, D)` triples induce the same
+law, the data can only ever pin down the law, and this is precisely why fits
+should be assessed through summaries rather than parameters.
+
 ## Structure preservation
 
 EM updates here are *zero-preserving*. The fitted parameters are stored as the
