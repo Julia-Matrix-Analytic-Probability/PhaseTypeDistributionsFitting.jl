@@ -14,9 +14,9 @@ which provides the distribution types this package fits.
 
 ## Scope
 
-The package is built in two stages: **(1) fitting PH distributions** (current
-focus), then **(2) fitting MAPH distributions** (the subject of the accompanying
-paper).
+The package covers **fitting PH distributions** (the classic EM) and **fitting
+MAPH distributions** (the approximate EM of the accompanying paper, for
+competing-risks data).
 
 - **Maximum likelihood via EM (`fit_mle`)** — *implemented for PH.* The classic
   Asmussen–Nerman–Olsson EM algorithm, with an *exact* E-step computed through a
@@ -24,10 +24,16 @@ paper).
   observation gives every expected sufficient statistic). Targets the general
   `PHDist` as well as the structured families (`CoxianDist`,
   `HyperExponentialDist`, `HypoExponentialDist`, `ErlangPHDist`).
+- **MAPH fitting (`fit_mle(MAPHDist, data)`)** — *implemented.* The approximate
+  EM of the paper for competing-risks observations `(t, k)` (absorption time and
+  cause): exact E-step via Van Loan matrix exponentials, a closed-form *relaxed*
+  M-step in the inference-oriented `(α, q, R, U)` parameterization, and an
+  ℓ1-projection linear program (HiGHS) that restores feasibility whenever the
+  relaxed update leaves the valid parameter region. Includes the two
+  initialization heuristics of the paper (moment-based and simplified).
 - **Moment matching (`fit_mm`)** — *planned* (currently a stub). Will produce a
   PH distribution from empirical moments, and serve as an initialization
   strategy for the EM.
-- **MAPH fitting** — *planned*, following the accompanying paper.
 
 The two estimation approaches are exposed as separate functions in the
 Distributions.jl style, with a `fit(...; method=)` router over them.
@@ -76,6 +82,23 @@ loop with `maxiter`, `tol`, `verbose`, and `rng`:
 fit_mle(PHDist, data; init = CoxianDist([3.0, 2.0, 1.0], [0.3, 0.4]),
         maxiter = 500, tol = 1e-8, verbose = true)
 ```
+
+Fit an MAPH to competing-risks data — pairs `(t, k)` of absorption time and
+cause, exactly what `rand(::MAPHDist, L)` returns:
+
+```julia
+truth = MAPHDist([0.5, 0.3, 0.2],
+                 [-3.0  1.0  0.5;  0.8 -2.5  0.7;  0.4  0.6 -2.0],   # T
+                 [ 1.0  0.5;  0.4  0.6;  0.3  0.7])                  # D
+data = rand(truth, 2000)                       # Vector of (t, k)
+
+fitted = fit_mle(MAPHDist, data; m = 3)        # number of causes read off data
+marginal_absorption(fitted)                    # ≈ empirical cause frequencies
+conditional_time(fitted, 1)                    # τ | κ = 1, as a PHDist
+```
+
+MAPH fits accept `init_method = :moment` (default) or `:simplified`, an explicit
+`init::MAPHDist`, and the usual `maxiter`/`tol`/`verbose` controls.
 
 ## Structure preservation
 

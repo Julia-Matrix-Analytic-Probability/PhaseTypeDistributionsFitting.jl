@@ -165,6 +165,74 @@ function Distributions.fit_mle(::Type{ErlangPHDist}, data::AbstractVector{<:Real
     return ErlangPHDist(Int(m), m / Statistics.mean(data))
 end
 
+"""
+    fit_mle(MAPHDist, data; m, init, init_method=:moment, maxiter=500, tol=1e-7,
+            verbose=false)
+
+Fit a multi-absorbing phase-type distribution to competing-risks observations
+`data` — a vector of pairs `(t, k)` with `t > 0` the absorption time and
+`k ∈ 1..n` the index of the absorbing cause (as returned by
+`rand(::MAPHDist, L)`) — by the approximate EM algorithm of the paper: an exact
+E-step via Van Loan matrix exponentials, a closed-form relaxed M-step in the
+`(α, q, R, U)` parameterization, and an ℓ1-projection linear program (HiGHS)
+that re-enforces the feasibility constraints whenever the relaxed update leaves
+the valid parameter region.
+
+Provide either the number of transient phases `m` — the starting point is then
+built by [`maph_moment_init`](@ref) (`init_method = :moment`, the default,
+matching per-cause means and SCVs) or [`maph_simplified_init`](@ref)
+(`init_method = :simplified`) — or an explicit `init::MAPHDist`. The number of
+absorbing states is read off the data (the largest cause index observed) unless
+`init` provides more. The reference cause of the second parameterization is the
+most frequent cause in the data; it must be reachable from every phase of the
+starting distribution (both built-in initializers guarantee this).
+
+Returns a `MAPHDist`. Because the M-step optimizes a relaxed surrogate followed
+by a projection, the log-likelihood is not guaranteed to increase at every
+iteration; convergence is declared when its change drops below `tol`. MAPH
+distributions are not identifiable, so compare fits through distributional
+summaries (absorption probabilities, conditional moments, cdfs) rather than
+through `(α, T, D)` directly.
+"""
+function Distributions.fit_mle(::Type{MAPHDist},
+                               data::AbstractVector{<:Tuple{<:Real, <:Integer}};
+                               m::Union{Integer, Nothing}=nothing, init=nothing,
+                               init_method::Symbol=:moment,
+                               maxiter::Int=500, tol::Real=1e-7, verbose::Bool=false)
+    isempty(data) && throw(ArgumentError("data must be non-empty"))
+    n = maximum(Int(k) for (_, k) in data)
+
+    if init !== nothing
+        init isa MAPHDist || throw(ArgumentError("init must be a MAPHDist, got $(typeof(init))"))
+        m === nothing || m == nphases(init) ||
+            throw(ArgumentError("m=$m conflicts with init of size $(nphases(init))"))
+        nabsorbing(init) >= n || throw(ArgumentError(
+            "init has $(nabsorbing(init)) absorbing states but the data contains cause $n"))
+        d0 = init
+    else
+        m === nothing && throw(ArgumentError("provide either `m` (number of phases) or `init`"))
+        d0 = if init_method === :moment
+            maph_moment_init(m, data)
+        elseif init_method === :simplified
+            maph_simplified_init(m, data)
+        else
+            throw(ArgumentError("unknown init_method $(repr(init_method)); use :moment or :simplified"))
+        end
+    end
+
+    # Reference cause for the second parameterization: the most frequent cause.
+    counts = zeros(Int, nabsorbing(d0))
+    for (_, k) in data
+        counts[k] += 1
+    end
+    ref = argmax(counts)
+
+    res = _maph_em(Vector(initial_prob(d0)), Matrix(subgenerator(d0)),
+                   Matrix(exit_rate_matrix(d0)), data;
+                   ref=ref, maxiter=maxiter, tol=tol, verbose=verbose)
+    return MAPHDist(res.α, res.T, res.D)
+end
+
 # ===========================================================================
 # fit_mm  (method of moments) — stub, planned for a future iteration
 # ===========================================================================
@@ -201,4 +269,10 @@ function Distributions.fit(::Type{D}, data::AbstractVector{<:Real};
     else
         throw(ArgumentError("unknown method $(repr(method)); use :mle or :mm"))
     end
+end
+
+function Distributions.fit(::Type{MAPHDist}, data::AbstractVector{<:Tuple{<:Real, <:Integer}};
+                           method::Symbol=:mle, kwargs...)
+    method === :mle || throw(ArgumentError("only method=:mle is available for MAPHDist"))
+    return fit_mle(MAPHDist, data; kwargs...)
 end
