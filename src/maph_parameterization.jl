@@ -191,6 +191,47 @@ function _project_U!(U::Matrix{Float64}, R::Matrix{Float64}, ref::Int;
 end
 
 """
+    _assert_absorption_certain(T, D, q; rtol=1e-12)
+
+Guard against the degenerate face of the constraint polytope (*): a tuple
+`(α, q, R, U)` can satisfy every constraint of (*) with equality along a closed
+set of phases, in which case the recovered chain cycles among those phases
+forever — absorption is not certain, `-T` is singular, and `(T, D)` is not a
+valid MAPH. The check is structural: every phase must reach, through the
+support of the off-diagonal entries of `T`, a phase `i` with exit rate
+`Σₖ Dᵢₖ > rtol·qᵢ` into the absorbing states. Throws an informative error when
+the check fails.
+"""
+function _assert_absorption_certain(T::AbstractMatrix{<:Real}, D::AbstractMatrix{<:Real},
+                                    q::AbstractVector{<:Real}; rtol::Real=1e-12)
+    m = size(T, 1)
+    can_absorb = falses(m)
+    stack = Int[]
+    for i in 1:m
+        if sum(view(D, i, :)) > rtol * q[i]
+            can_absorb[i] = true
+            push!(stack, i)
+        end
+    end
+    while !isempty(stack)
+        j = pop!(stack)
+        for i in 1:m
+            if !can_absorb[i] && i != j && T[i, j] > 0
+                can_absorb[i] = true
+                push!(stack, i)
+            end
+        end
+    end
+    trapped = findall(.!can_absorb)
+    isempty(trapped) || error(
+        "(α, q, R, U) lies on the degenerate face of the constraint polytope: " *
+        "phases $trapped cannot reach the absorbing states (every constraint of (*) " *
+        "is tight along a closed set of phases), so -T is singular and the parameters " *
+        "do not define a valid MAPH distribution")
+    return nothing
+end
+
+"""
     _generator_from_second(α, q, R, U; ref=1) -> (α, T, D)
 
 Convert `(α, q, R, U)` back to generator form. Off-diagonal rates are
@@ -198,7 +239,9 @@ Convert `(α, q, R, U)` back to generator form. Off-diagonal rates are
 floating-point round-off can leave tiny negative entries in `D` even after the
 projection, so `D` is clamped at zero and the diagonal of `T` is recomputed as
 `Tᵢᵢ = -(Σ_{j≠i} Tᵢⱼ + Σₖ Dᵢₖ)` — preserving exact zero row sums at the cost of
-an O(round-off) shift in qᵢ. `α` is renormalized to sum to exactly 1.
+an O(round-off) shift in qᵢ. `α` is renormalized to sum to exactly 1. Throws if
+the tuple lies on the degenerate face of (*) where absorption is never certain
+(see [`_assert_absorption_certain`](@ref)).
 """
 function _generator_from_second(α::AbstractVector{<:Real}, q::AbstractVector{<:Real},
                                 R::AbstractMatrix{<:Real}, U::AbstractMatrix{<:Real};
@@ -222,6 +265,7 @@ function _generator_from_second(α::AbstractVector{<:Real}, q::AbstractVector{<:
     for i in 1:m
         T[i, i] = -(sum(view(T, i, 1:m)) - T[i, i] + sum(view(D, i, :)))
     end
+    _assert_absorption_certain(T, D, q)
     αout = collect(Float64, α)
     s = sum(αout)
     s > 0 || throw(ArgumentError("α summed to $s; cannot normalise"))

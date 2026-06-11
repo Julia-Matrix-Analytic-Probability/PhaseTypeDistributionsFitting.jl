@@ -328,6 +328,28 @@ const PTDF = PhaseTypeDistributionsFitting
             @test all(D2 .>= 0)
         end
 
+        @testset "degenerate-face guard" begin
+            # Counterexample from the paper's remark on the conversion proposition:
+            # both rows of R equal and u₁₂ = u₂₁ = 1 satisfy every linear
+            # constraint with equality, yet the recovered chain cycles between
+            # the two phases forever — D = 0 and -T is singular. The conversion
+            # must refuse rather than return an invalid MAPH.
+            a = 0.4
+            R = [a 1-a; a 1-a]
+            U = [0.0 1.0; 1.0 0.0]
+            q = [1.0, 2.0]
+            α = [0.5, 0.5]
+            @test_throws ErrorException PTDF._generator_from_second(α, q, R, U; ref = 1)
+
+            # Same tight first row but with an escape route: phase 1 reaches
+            # phase 2, whose constraints are strict, so absorption stays
+            # certain and the conversion goes through.
+            U_ok = [0.0 1.0; 0.0 0.0]
+            α2, T2, D2 = PTDF._generator_from_second(α, q, R, U_ok; ref = 1)
+            @test all(D2 .>= 0) && sum(D2[2, :]) > 0
+            @test (-T2) \ D2 ≈ R atol = 1e-12    # R really is the absorption matrix
+        end
+
         @testset "simplified initialization matches π̂ and the overall mean" begin
             rng = StableRNG(31)
             data = rand(rng, truth, 1500)
