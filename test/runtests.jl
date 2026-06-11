@@ -211,4 +211,323 @@ const PTDF = PhaseTypeDistributionsFitting
         @test Matrix(res.T)[1, 1] ≈ -1 / mean(data) rtol = 1e-6
     end
 
+    # =======================================================================
+    # MAPH (competing-risks) fitting
+    # =======================================================================
+    @testset "MAPH fitting" begin
+
+        # A well-connected ground truth used throughout: m = 3, n = 2.
+        T_truth = [-3.0  1.0  0.5;
+                    0.8 -2.5  0.7;
+                    0.4  0.6 -2.0]
+        D_truth = [1.0 0.5;
+                   0.4 0.6;
+                   0.3 0.7]
+        α_truth = [0.5, 0.3, 0.2]
+        truth = MAPHDist(α_truth, T_truth, D_truth)
+
+        maph_loglik(d, data) = sum(log(pdf(d, t, k)) for (t, k) in data)
+
+        @testset "input validation" begin
+            @test_throws ArgumentError fit_mle(MAPHDist, Tuple{Float64, Int}[]; m = 2)
+            @test_throws ArgumentError fit_mle(MAPHDist, [(1.0, 1), (-2.0, 2)]; m = 2)
+            @test_throws ArgumentError fit_mle(MAPHDist, [(1.0, 1), (2.0, 0)]; m = 2)
+            @test_throws ArgumentError fit_mle(MAPHDist, [(1.0, 1), (2.0, 2)])  # no m, no init
+            @test_throws ArgumentError fit_mle(MAPHDist, [(1.0, 1)]; m = 2, init_method = :bogus)
+            @test_throws ArgumentError fit_mle(MAPHDist, [(1.0, 1), (2.0, 2)]; m = 5, init = truth)
+            @test_throws ArgumentError fit(MAPHDist, [(1.0, 1), (2.0, 2)]; method = :mm, m = 2)
+        end
+
+        @testset "second parameterization round trip" begin
+            for ref in 1:2
+                q, R, U = PTDF._second_parameterization(T_truth, D_truth; ref = ref)
+                @test q ≈ -diag(T_truth)
+                @test all(R .> 0)
+                @test vec(sum(R; dims = 2)) ≈ ones(3)        # rows of R are stochastic
+                @test all(diag(U) .== 0.0)
+                # A valid MAPH satisfies the linear constraints (Prop. in the paper).
+                A = PTDF._uconstraints(R, ref)
+                for i in 1:3
+                    b = R[i, :] ./ R[i, ref]
+                    @test all(A * U[i, :] .<= b .+ 1e-10)
+                end
+                # Converting back recovers the generator parameters exactly.
+                α2, T2, D2 = PTDF._generator_from_second(α_truth, q, R, U; ref = ref)
+                @test α2 ≈ α_truth atol = 1e-14
+                @test T2 ≈ T_truth atol = 1e-12
+                @test D2 ≈ D_truth atol = 1e-12
+            end
+        end
+
+        @testset "E-step identities and quadrature cross-check" begin
+            t, k = 1.3, 1
+            stats = PTDF._maph_estep(α_truth, T_truth, D_truth, [(t, k)], k)
+            # Exactly one start, total holding time t, exactly one absorbing jump:
+            @test sum(stats.B) ≈ 1.0 atol = 1e-12
+            @test sum(stats.Z) ≈ t atol = 1e-10
+            # With a single ref-cause observation the ref-restricted stats are the totals.
+            @test stats.N ≈ stats.Nref
+            @test stats.Bk[:, k] ≈ stats.B
+
+            # Cross-check Z̄ and M̄ against direct numerical integration of
+            # C[i,j] = ∫₀ᵗ (α'e^{Tu})_i (e^{T(t-u)}D[:,k])_j du.
+            f = (α_truth' * exp(T_truth * t) * D_truth[:, k])
+            npts = 4001
+            us = range(0, t; length = npts)
+            front = [α_truth' * exp(T_truth * u) for u in us]
+            back = [exp(T_truth * (t - u)) * D_truth[:, k] for u in us]
+            h = step(us)
+            for i in 1:3, j in 1:3
+                vals = [front[s][i] * back[s][j] for s in 1:npts]
+                Cij = h * (sum(vals) - 0.5 * (vals[1] + vals[end]))
+                if i == j
+                    @test stats.Z[i] ≈ Cij / f rtol = 1e-6
+                else
+                    @test stats.Mref[i, j] ≈ T_truth[i, j] * Cij / f rtol = 1e-6
+                end
+            end
+        end
+
+        @testset "constraint-enforcement LP" begin
+            q, R, U = PTDF._second_parameterization(T_truth, D_truth; ref = 1)
+            Rm = Matrix(R)
+
+            # Feasible U: projection is a no-op.
+            U1 = copy(U)
+            @test PTDF._project_U!(U1, Rm, 1) == 0
+            @test U1 == U
+
+            # Infeasible row: gets projected onto the polytope.
+            U2 = copy(U)
+            U2[1, 2] = 5.0
+            n_proj = PTDF._project_U!(U2, Rm, 1)
+            @test n_proj == 1
+            A = PTDF._uconstraints(Rm, 1)
+            b1 = Rm[1, :] ./ Rm[1, 1]
+            @test all(A * U2[1, :] .<= b1 .+ 1e-7)
+            @test all(U2[1, :] .>= 0)
+            @test U2[1, 1] == 0.0
+            @test U2[2, :] == U[2, :]            # untouched rows stay untouched
+
+            # ℓ1 optimality of the projected row against a brute-force grid over
+            # the two free coordinates (u₁₂, u₁₃).
+            uhat = [0.0, 5.0, 0.3]
+            uproj = PTDF._l1_row_projection(A, copy(b1), uhat, 1)
+            lp_obj = sum(abs.(uproj .- uhat))
+            best = Inf
+            for u12 in range(0, 2; length = 401), u13 in range(0, 2; length = 401)
+                u = [0.0, u12, u13]
+                all(A * u .<= b1 .+ 1e-12) || continue
+                best = min(best, sum(abs.(u .- uhat)))
+            end
+            @test lp_obj <= best + 1e-8           # LP at least as good as the grid
+            @test lp_obj >= best - 0.02           # and the grid confirms it (resolution)
+
+            # The projected parameters convert to a valid generator: D ≥ 0.
+            _, _, D2 = PTDF._generator_from_second(α_truth, q, Rm, U2; ref = 1)
+            @test all(D2 .>= 0)
+        end
+
+        @testset "degenerate-face guard" begin
+            # Counterexample from the paper's remark on the conversion proposition:
+            # both rows of R equal and u₁₂ = u₂₁ = 1 satisfy every linear
+            # constraint with equality, yet the recovered chain cycles between
+            # the two phases forever — D = 0 and -T is singular. The conversion
+            # must refuse rather than return an invalid MAPH.
+            a = 0.4
+            R = [a 1-a; a 1-a]
+            U = [0.0 1.0; 1.0 0.0]
+            q = [1.0, 2.0]
+            α = [0.5, 0.5]
+            @test_throws ErrorException PTDF._generator_from_second(α, q, R, U; ref = 1)
+
+            # Same tight first row but with an escape route: phase 1 reaches
+            # phase 2, whose constraints are strict, so absorption stays
+            # certain and the conversion goes through.
+            U_ok = [0.0 1.0; 0.0 0.0]
+            α2, T2, D2 = PTDF._generator_from_second(α, q, R, U_ok; ref = 1)
+            @test all(D2 .>= 0) && sum(D2[2, :]) > 0
+            @test (-T2) \ D2 ≈ R atol = 1e-12    # R really is the absorption matrix
+        end
+
+        @testset "simplified initialization matches π̂ and the overall mean" begin
+            rng = StableRNG(31)
+            data = rand(rng, truth, 1500)
+            L = length(data)
+            π̂ = [count(o -> o[2] == k, data) / L for k in 1:2]
+            μ̄ = mean(first.(data))
+
+            # jitter = 0 is the exact Appendix-C construction: τ ~ Exp(1/μ̄) ⊥ κ.
+            d0 = PTDF.maph_simplified_init(4, data; beta = 0.5, jitter = 0.0)
+            @test nphases(d0) == 4
+            @test nabsorbing(d0) == 2
+            @test marginal_absorption(d0) ≈ π̂ atol = 1e-12
+            @test mean(PHDist(d0)) ≈ μ̄ rtol = 1e-10
+            # Conditional times are exponential with mean μ̄ — SCV 1, mean μ̄.
+            for k in 1:2
+                cond = conditional_time(d0, k)
+                @test mean(cond) ≈ μ̄ rtol = 1e-8
+                @test scv(cond) ≈ 1.0 atol = 1e-8
+            end
+            # Strictly positive parameters: reachability and interior start.
+            @test all(Vector(initial_prob(d0)) .> 0)
+            @test all(Matrix(absorption_probs(d0)) .> 0)
+
+            # Default jitter breaks phase exchangeability (so the EM can
+            # differentiate phases) while keeping π̂ and the mean exact.
+            dj = PTDF.maph_simplified_init(4, data)
+            @test marginal_absorption(dj) ≈ π̂ atol = 1e-12
+            @test mean(PHDist(dj)) ≈ μ̄ rtol = 1e-10
+            qs = -diag(Matrix(subgenerator(dj)))
+            @test length(unique(round.(qs; digits = 10))) == 4   # distinct sojourn rates
+
+            # m = 1 forces beta = 0 and still matches π̂ and the mean.
+            d1 = PTDF.maph_simplified_init(1, data)
+            @test marginal_absorption(d1) ≈ π̂ atol = 1e-12
+            @test mean(PHDist(d1)) ≈ μ̄ rtol = 1e-10
+        end
+
+        @testset "moment initialization matches per-cause moments" begin
+            rng = StableRNG(32)
+            data = rand(rng, truth, 4000)
+            L = length(data)
+            π̂ = [count(o -> o[2] == k, data) / L for k in 1:2]
+
+            # Unregularized: matching is exact (Proposition in Appendix C).
+            d0 = PTDF.maph_moment_init(8, data; epsilon = 0.0, theta = 0.0)
+            @test nphases(d0) == 8
+            @test marginal_absorption(d0) ≈ π̂ atol = 1e-10
+            for k in 1:2
+                times = [t for (t, kk) in data if kk == k]
+                μ̂k = mean(times)
+                ĉ²k = var(times) / μ̂k^2
+                cond = conditional_time(d0, k)
+                @test mean(cond) ≈ μ̂k rtol = 1e-8
+                @test scv(cond) ≈ ĉ²k rtol = 1e-8
+            end
+
+            # Default regularization: strictly positive α, full reachability,
+            # and the matched quantities only perturbed slightly.
+            dreg = PTDF.maph_moment_init(8, data)
+            @test all(Vector(initial_prob(dreg)) .> 0)
+            @test all(Matrix(absorption_probs(dreg)) .> 0)
+            @test marginal_absorption(dreg) ≈ π̂ rtol = 0.05
+            for k in 1:2
+                times = [t for (t, kk) in data if kk == k]
+                cond = conditional_time(dreg, k)
+                @test mean(cond) ≈ mean(times) rtol = 0.1
+            end
+
+            # Too few phases for any block: falls back to the simplified init.
+            dsmall = PTDF.maph_moment_init(1, data)
+            @test nphases(dsmall) == 1
+            @test marginal_absorption(dsmall) ≈ π̂ atol = 1e-12
+        end
+
+        @testset "m=1 EM has the closed-form solution" begin
+            rng = StableRNG(33)
+            data = rand(rng, truth, 800)
+            L = length(data)
+            fitted = fit_mle(MAPHDist, data; m = 1, maxiter = 50)
+            @test nphases(fitted) == 1
+            # q̂ = 1/mean, ρ̂ₖ = empirical proportions — exact closed forms.
+            @test Matrix(subgenerator(fitted))[1, 1] ≈ -1 / mean(first.(data)) rtol = 1e-8
+            π̂ = [count(o -> o[2] == k, data) / L for k in 1:2]
+            @test marginal_absorption(fitted) ≈ π̂ atol = 1e-8
+        end
+
+        @testset "end-to-end recovery on synthetic data" begin
+            rng = StableRNG(34)
+            data = rand(rng, truth, 2000)
+            L = length(data)
+            fitted = fit_mle(MAPHDist, data; m = 3, maxiter = 300)
+            @test fitted isa MAPHDist
+            @test nphases(fitted) == 3
+            @test nabsorbing(fitted) == 2
+
+            # Marginal absorption probabilities match the empirical frequencies.
+            π̂ = [count(o -> o[2] == k, data) / L for k in 1:2]
+            @test marginal_absorption(fitted) ≈ π̂ atol = 0.02
+
+            # The moment-init route approaches the truth's explanatory power;
+            # on this seed its trajectory rides the feasibility boundary (the
+            # projection fires most iterations) and is still crawling at the
+            # iteration cap, hence the looser slack.
+            @test maph_loglik(fitted, data) >= maph_loglik(truth, data) - 6.0
+
+            # The simplified-init route beats the truth outright on this data —
+            # the decisive identifiability-free check.
+            fitted2 = fit_mle(MAPHDist, data; m = 3, init_method = :simplified, maxiter = 300)
+            @test maph_loglik(fitted2, data) >= maph_loglik(truth, data)
+            @test marginal_absorption(fitted2) ≈ π̂ atol = 0.02
+
+            # And its conditional means land within a few percent of the truth's.
+            for k in 1:2
+                mt = kth_joint_moment(truth, k, 1) / marginal_absorption(truth)[k]
+                mf = kth_joint_moment(fitted2, k, 1) / marginal_absorption(fitted2)[k]
+                @test isapprox(mf, mt; rtol = 0.10)
+            end
+        end
+
+        @testset "EM internals: trace, convergence, projection counter" begin
+            rng = StableRNG(35)
+            data = rand(rng, truth, 600)
+            d0 = PTDF.maph_moment_init(3, data)
+            res = PTDF._maph_em(Vector(initial_prob(d0)), Matrix(subgenerator(d0)),
+                                Matrix(exit_rate_matrix(d0)), data;
+                                ref = 1, maxiter = 200, tol = 1e-8)
+            @test all(isfinite, res.loglik)
+            @test res.loglik[end] >= res.loglik[1]       # improves overall
+            @test res.nprojections >= 0
+            @test res.iterations <= 200
+            # The result is a valid MAPH parameterization.
+            @test isapprox(sum(res.α), 1.0; atol = 1e-10)
+            @test all(res.D .>= 0)
+            @test maximum(abs.(vec(sum(res.T; dims = 2) .+ sum(res.D; dims = 2)))) < 1e-8
+        end
+
+        @testset "structural zeros of α and T are EM-invariant" begin
+            rng = StableRNG(36)
+            data = rand(rng, truth, 400)
+            # Feed-forward T with T[2,1] = T[3,1] = T[3,2] = 0 and α₃ = 0; both
+            # absorbing states reachable from every phase, so the EM can run.
+            α0 = [0.7, 0.3, 0.0]
+            T0 = [-3.0  1.0  0.5;
+                   0.0 -2.5  0.7;
+                   0.0  0.0 -2.0]
+            D0 = [1.0 0.5;
+                  0.9 0.9;
+                  1.2 0.8]
+            res = PTDF._maph_em(α0, T0, D0, data; ref = 1, maxiter = 20, tol = 0.0)
+            @test res.α[3] == 0.0
+            @test res.T[2, 1] == 0.0
+            @test res.T[3, 1] == 0.0
+            @test res.T[3, 2] == 0.0
+        end
+
+        @testset "n=1 MAPH agrees with the PH EM" begin
+            rng = StableRNG(37)
+            ph_truth = HyperExponentialDist([0.6, 0.4], [1.0, 0.25])
+            times = rand(rng, ph_truth, 1500)
+            data = [(t, 1) for t in times]
+
+            mfit = fit_mle(MAPHDist, data; m = 2, maxiter = 300, tol = 1e-9)
+            pfit = fit_mle(PHDist, times; m = 2, maxiter = 300, tol = 1e-9,
+                           rng = StableRNG(38))
+            ll_m = maph_loglik(mfit, data)
+            ll_p = sum(log(pdf(pfit, t)) for t in times)
+            @test isapprox(ll_m, ll_p; rtol = 1e-3)
+        end
+
+        @testset "unobserved cause keeps (near) zero probability" begin
+            rng = StableRNG(39)
+            data = [(t, 1) for t in rand(rng, Exponential(1.0), 500)]
+            # init declares two absorbing states, but only cause 1 is observed.
+            init = PTDF.maph_simplified_init(2, [(1.0, 1), (1.0, 2)])
+            fitted = fit_mle(MAPHDist, data; init = init, maxiter = 100)
+            @test marginal_absorption(fitted)[2] < 1e-6
+        end
+
+    end
+
 end

@@ -22,6 +22,7 @@ makedocs(;
     pages = [
         "Home" => "index.md",
         "Fitting PH distributions" => "fitting.md",
+        "Fitting MAPH distributions" => "maph.md",
         "The EM algorithm" => "em.md",
         "API reference" => "api.md",
     ],

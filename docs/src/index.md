@@ -36,9 +36,9 @@ available as constrained targets.
 
 | Estimator | Status | Notes |
 |-----------|--------|-------|
-| [`fit_mle`](@ref) (EM)            | **implemented for PH** | exact E-step via a Van Loan block-matrix exponential |
-| [`fit_mm`](@ref) (moment matching) | planned (stub)         | will also seed the EM |
-| MAPH fitting                      | planned                | follows the accompanying paper |
+| [`fit_mle`](@ref) (EM) — PH        | **implemented** | exact E-step via a Van Loan block-matrix exponential |
+| [`fit_mle`](@ref) (EM) — MAPH      | **implemented** | approximate EM: relaxed M-step + ℓ1-projection LP; see [Fitting MAPH distributions](maph.md) |
+| [`fit_mm`](@ref) (moment matching) | planned (stub)  | will also seed the EM |
 
 ## Installation
 
