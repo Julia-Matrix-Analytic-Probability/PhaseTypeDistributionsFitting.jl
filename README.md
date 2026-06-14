@@ -7,9 +7,9 @@ Maximum-likelihood fitting of phase-type (PH) and multi-absorbing phase-type
 (MAPH) distributions. Companion package to
 [PhaseTypeDistributions.jl](https://github.com/Julia-Matrix-Analytic-Probability/PhaseTypeDistributions.jl),
 which provides the distribution types this package fits, and to the paper
-*Inference for Multi-Absorbing Phase Type Distributions, Algorithms, and
-Applications* (Qiao, Surya, Asanjarani, Nazarathy — in preparation), whose
-algorithms it implements.
+*Multi-Absorbing Phase-Type Distributions for Competing Risks: Inference,
+Algorithms, and Applications* (Qiao, Surya, Asanjarani, Nazarathy — in
+preparation), whose algorithms it implements.
 
 ## What it does
 
@@ -274,6 +274,6 @@ them as we go.
 
 If you use this package in academic work, please cite the accompanying paper:
 
-> Zhihao Qiao, Budhi Surya, Azam Asanjarani, Yoni Nazarathy. *Inference for
-> Multi-Absorbing Phase Type Distributions, Algorithms, and Applications*. (In
-> preparation.)
+> Zhihao Qiao, Budhi Surya, Azam Asanjarani, Yoni Nazarathy. *Multi-Absorbing
+> Phase-Type Distributions for Competing Risks: Inference, Algorithms, and
+> Applications*. (In preparation.)
