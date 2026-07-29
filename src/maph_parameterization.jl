@@ -59,6 +59,11 @@ end
 The `n × m` constraint matrix of (*), `A[k, j] = R[j, k] / R[j, ref]`, shared by
 all row programs. The right-hand side for row `i` is `b[k] = R[i, k] / R[i, ref]`.
 Row `ref` of `A` is all ones with right-hand side 1 — sub-stochasticity of U.
+
+Throws when a phase reaches the reference cause with a probability so small that
+the ratios overflow the solver's finite range: the iterate has drifted to the
+edge of the region where the second parameterization is defined, and the caller
+should be told that rather than handed a program the solver will reject.
 """
 function _uconstraints(R::AbstractMatrix{<:Real}, ref::Int)
     m, n = size(R)
@@ -66,6 +71,11 @@ function _uconstraints(R::AbstractMatrix{<:Real}, ref::Int)
     for j in 1:m, k in 1:n
         A[k, j] = R[j, k] / R[j, ref]
     end
+    all(isfinite, A) && maximum(A) < _HIGHS_INF || throw(ArgumentError(
+        "the reference cause $ref has become effectively unreachable from some phase " *
+        "(min R[:, $ref] = $(minimum(view(R, :, ref)))), so the constraint ratios " *
+        "R[j, k]/R[j, $ref] overflow; refit from a different initialization, with " *
+        "fewer phases, or with a reference cause reachable from every phase"))
     return A
 end
 

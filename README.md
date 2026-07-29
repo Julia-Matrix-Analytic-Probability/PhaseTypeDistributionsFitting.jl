@@ -25,10 +25,12 @@ Asanjarani, Nazarathy — in preparation), whose algorithms it implements.
   *relaxed* M-step in the inference-oriented `(α, q, R, U)` parameterization,
   and an ℓ1-projection linear program (solved with the open-source
   [HiGHS](https://highs.dev) solver) that restores feasibility whenever the
-  relaxed update leaves the valid parameter region. Includes the two
-  initialization heuristics of the paper (moment-based and simplified), a
-  stopping rule robust to the non-monotone iteration, and a guard against
-  degenerate (non-absorbing) parameter configurations.
+  relaxed update leaves the valid parameter region. Handles independently
+  **right-censored** records through a `censored` keyword, using the paper's
+  cause-resolved censored E-step. Includes the two initialization heuristics of
+  the paper (moment-based and simplified), a stopping rule robust to the
+  non-monotone iteration, and a guard against degenerate (non-absorbing)
+  parameter configurations.
 - **`fit(...; method = :mle)`** — a Distributions.jl-style router over the
   estimation methods. (`fit_mm`, moment matching, is reserved and currently a
   stub that throws.)
@@ -94,11 +96,20 @@ marginal_absorption(fitted)                    # ≈ empirical cause frequencies
 conditional_time(fitted, 1)                    # τ | κ = 1, as a PHDist
 ```
 
-MAPH fits accept `init_method = :moment` (default) or `:simplified`, an
-explicit `init::MAPHDist`, and the usual `maxiter`/`tol`/`verbose` controls.
-Because MAPH distributions are not identifiable, compare a fit to a reference
-through distributional summaries (`marginal_absorption`, `conditional_time`,
-`cdf`), not through the parameters themselves.
+Right-censored subjects — known only to have been event-free at some time `c` —
+are passed as `censored`:
+
+```julia
+sim = rand_censored(truth, 2000, 1.5)          # censor at a fixed horizon
+fit_mle(MAPHDist, sim.events; m = 3, censored = sim.censored)
+```
+
+MAPH fits accept `init_method = :auto` (default; `:moment` for complete data,
+`:simplified` under censoring), an explicit `init::MAPHDist`, and the usual
+`maxiter`/`tol`/`verbose` controls. Because MAPH distributions are not
+identifiable, compare a fit to a reference through distributional summaries
+(`marginal_absorption`, `conditional_time`, `cdf`), not through the parameters
+themselves.
 
 ## MAPH fitting in more detail
 
@@ -111,11 +122,11 @@ MAPH laws are natural competing-risks lifetime models — the accompanying paper
 fits ICU length-of-stay ending in either discharge or death, and
 cause-specific mouse mortality with three causes.
 
-The data must be fully observed: every observation is a pair `(t, k)` with
-`t > 0` an exact absorption time and `k` its cause (right-censored
-observations are not yet supported). The number of causes `n` is read off the
-data; the number of phases `m` is the user's model-order choice (compare
-orders by AIC/BIC on the fitted log-likelihoods).
+An exact observation is a pair `(t, k)` with `t > 0` an absorption time and `k`
+its cause. Subjects who leave the study before their event are passed
+separately, as right-censoring times (see below). The number of causes `n` is
+read off the events; the number of phases `m` is the user's model-order choice
+(compare orders by AIC/BIC on the fitted log-likelihoods).
 
 `fit_mle(MAPHDist, data; m)` runs the approximate EM of the paper. Each
 iteration:
@@ -241,10 +252,10 @@ the EM is free to fill the whole matrix.
 
 ## Current limitations
 
-- **Fully observed data only.** Both the PH and the MAPH EM require every
-  observation to be an exact absorption time (and cause). Right-censored
-  observations are not yet supported; extending the E-step to censoring is
-  planned.
+- **Censoring is MAPH-only.** `fit_mle(MAPHDist, …)` handles independently
+  right-censored records through the `censored` keyword; the PH EM
+  (`fit_mle(PHDist, …)` and the structured families) still requires every
+  observation to be an exact absorption time.
 - **`fit_mm` is a stub.** Moment matching as a standalone estimator is not yet
   implemented (the moment-based construction is currently used internally, as
   an EM initialization).
