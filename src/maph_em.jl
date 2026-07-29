@@ -1,11 +1,13 @@
-# Approximate EM engine for MAPH distributions (competing-risks data).
+# Approximate EM engine for MAPH distributions (competing-risks data), with
+# support for independently right-censored records.
 #
-# Data are pairs (t, k): the absorption time t > 0 and the index k ∈ 1..n of the
-# absorbing state (the cause). Only (t, k) is observed — the trajectory of the
-# underlying CTMC is latent — so the complete-data sufficient statistics are
-# replaced by conditional expectations (the E-step), computed exactly with a
-# Van Loan block-matrix exponential exactly as in the PH engine (`em.jl`), with
-# the exit vector t⁰ replaced by the observed cause's column D[:, k]:
+# An exact-event datum is a pair (t, k): the absorption time t > 0 and the index
+# k ∈ 1..n of the absorbing state (the cause). Only (t, k) is observed — the
+# trajectory of the underlying CTMC is latent — so the complete-data sufficient
+# statistics are replaced by conditional expectations (the E-step), computed
+# exactly with a Van Loan block-matrix exponential exactly as in the PH engine
+# (`em.jl`), with the exit vector t⁰ replaced by the observed cause's column
+# D[:, k]:
 #
 #     a(t,k)      = α' exp(Tt)                       (row m-vector)
 #     b(t,k)      = exp(Tt) D[:,k]                   (column m-vector)
@@ -18,13 +20,45 @@
 #     Ēᵢ = aᵢ D[i,k] / f       expected absorbing-jump-from-i indicator
 #     N̄ᵢ = Σⱼ M̄ᵢⱼ + Ēᵢ       expected exits from i
 #
-# The M-step maximizes the *relaxed* complete-data likelihood in the second
-# parameterization (α, q, R, U) of maph_parameterization.jl — all closed form:
+# A right-censored datum is a time c > 0 at which the subject is known only to
+# be still alive: the observation is the event {τ > c} and the eventual cause is
+# unobserved. The complete datum is still the whole path through its eventual
+# absorption, so the E-step must both complete the path on either side of c and
+# apportion the cause-resolved statistics over *all* causes. With
 #
-#     α̂ᵢ = Σℓ B̄ᵢ / L                       ρ̂ᵢₖ = Σ_{ℓ: kℓ=k} B̄ᵢ / Σℓ B̄ᵢ
-#     q̂ᵢ = Σℓ N̄ᵢ / Σℓ Z̄ᵢ                 ûᵢⱼ = Σ_{ℓ: kℓ=ref} M̄ᵢⱼ / Σ_{ℓ: kℓ=ref} N̄ᵢ
+#     a(c)   = α' exp(Tc),      S(c) = a(c)·1        (survival, the likelihood)
+#     g(c)   = a(c)(-T)⁻¹                            (occupation times after c)
+#     R      = (-T)⁻¹D,   R[:,k] = Rₖ,   Σₖ Rₖ = 1   (eventual-cause matrix)
+#     C(c;b) = ∫₀ᶜ exp(Tᵀu) (αᵀ bᵀ) exp(Tᵀ(c-u)) du
 #
-# where `ref` is the reference cause (most frequent in the data). The relaxed
+# the censored expectations are
+#
+#     B̄ᶜᵢₖ = αᵢ (exp(Tc) Rₖ)ᵢ / S
+#     Z̄ᶜᵢ  = (C(c;1)[i,i] + gᵢ) / S
+#     Ēᶜᵢₖ = gᵢ Dᵢₖ / S
+#     M̄ᶜᵢⱼₖ = Tᵢⱼ (C(c;Rₖ)[i,j] + gᵢ ρⱼₖ) / S        (i ≠ j)
+#     N̄ᶜᵢₖ = Σⱼ M̄ᶜᵢⱼₖ + Ēᶜᵢₖ
+#
+# and the record contributes log S(c) to the observed-data log-likelihood. Each
+# censored record needs only *two* Van Loan exponentials, not one per cause:
+# since Σₖ Rₖ = 1 and Σₖ ρⱼₖ = 1, the all-cause totals B̄ᶜᵢ, Z̄ᶜᵢ, N̄ᶜᵢ collapse
+# onto C(c;1), while the reference-cause slices Mref/Nref need only C(c;R_ref).
+# The cause-resolved B̄ᶜᵢₖ needs no block exponential at all — exp(Tc)R is one
+# m×n product off the exp(Tᵀc) block the Van Loan call already returns. When
+# n = 1 the two exponentials coincide and one suffices.
+#
+# Both kinds of record are then packaged into the same cause-resolved per-record
+# contributions (bᵢₖ, zᵢ, mᵢⱼₖ, nᵢₖ) — an event puts its whole mass on its
+# observed cause, a censored record spreads it fractionally over all causes —
+# and the M-step is identical in the two cases. It maximizes the *relaxed*
+# complete-data likelihood in the second parameterization (α, q, R, U) of
+# maph_parameterization.jl — all closed form:
+#
+#     α̂ᵢ = Σℓ bᵢ / L                       ρ̂ᵢₖ = Σℓ bᵢₖ / Σℓ bᵢ
+#     q̂ᵢ = Σℓ nᵢ / Σℓ zᵢ                  ûᵢⱼ = Σℓ mᵢⱼ,ref / Σℓ nᵢ,ref
+#
+# where `L` counts *all* records (events and censored) and `ref` is the
+# reference cause (the most frequent observed event cause). The relaxed
 # Û may violate the feasibility constraints that keep D = -T·R non-negative;
 # Step 4 projects the violating rows back (an ℓ1-projection LP, see
 # `_project_U!`), and Step 5 converts (α̂, q̂, R̂, U*) back to (α, T, D).
@@ -45,7 +79,14 @@ Expected sufficient statistics accumulated over the whole data set in one
 E-step. `B`, `Z`, `N` are length-m totals over all observations; `Bk[i, k]`
 restricts `B` to observations absorbed in cause `k`; `Mref` (m×m) and `Nref`
 restrict `M` and `N` to observations absorbed in the reference cause. `loglik`
-is the observed-data log-likelihood Σℓ log f(tℓ, kℓ) at the E-step parameters.
+is the observed-data log-likelihood Σℓ log f(tℓ, kℓ) + Σℓ log S(cℓ) at the
+E-step parameters (the second sum over the right-censored records).
+
+An exact-event record contributes to the single column `Bk[:, kℓ]` and, when
+`kℓ` is the reference cause, to `Mref`/`Nref`. A censored record has no observed
+cause, so the current model spreads it fractionally over every column of `Bk`
+and over `Mref`/`Nref` in proportion to its posterior probability of eventually
+being absorbed in the reference cause.
 """
 struct MAPHEMStats
     B::Vector{Float64}
@@ -58,14 +99,20 @@ struct MAPHEMStats
 end
 
 """
-    _maph_estep(α, T, D, data, ref) -> MAPHEMStats
+    _maph_estep(α, T, D, data, ref; censored = Float64[]) -> MAPHEMStats
 
 One E-step: exact conditional expectations of the complete-data sufficient
-statistics for MAPH(α, T, D), aggregated over `data` (pairs `(t, k)`), via one
-(2m × 2m) Van Loan matrix exponential per observation.
+statistics for MAPH(α, T, D), aggregated over the exact-event `data` (pairs
+`(t, k)`) and the right-censored times `censored`.
+
+Each exact-event record costs one (2m × 2m) Van Loan matrix exponential; each
+censored record costs two — `C(c; 1)` for the all-cause totals and `C(c; R_ref)`
+for the reference-cause slices — collapsing to one when `n == 1` (see the file
+header for the formulas).
 """
 function _maph_estep(α::Vector{Float64}, T::Matrix{Float64}, D::Matrix{Float64},
-                     data::AbstractVector{<:Tuple{<:Real, <:Integer}}, ref::Int)
+                     data::AbstractVector{<:Tuple{<:Real, <:Integer}}, ref::Int;
+                     censored::AbstractVector{<:Real}=Float64[])
     m = length(α)
     n = size(D, 2)
     B = zeros(m)
@@ -112,6 +159,62 @@ function _maph_estep(α::Vector{Float64}, T::Matrix{Float64}, D::Matrix{Float64}
             Ni = Mi + Ei
             N[i] += Ni
             isref && (Nref[i] += Ni)
+        end
+    end
+
+    isempty(censored) && return MAPHEMStats(B, Bk, Z, N, Mref, Nref, loglik)
+
+    # ---- right-censored records ----
+    # R and the factorization of (-T)ᵀ (used for g(c) = a(c)(-T)⁻¹, i.e.
+    # (-T)ᵀ g = a) depend only on the parameters, so both are formed once.
+    R = -T \ D
+    negTt = lu(-Tt)
+    ones_m = ones(m)
+    dsum = vec(sum(D; dims=2))          # dsumᵢ = Σₖ Dᵢₖ, the total exit rate
+    G1 = α * ones_m'                    # b = 1_m  → C(c; 1)
+    Gref = n == 1 ? G1 : α * R[:, ref]' # b = R_ref → C(c; R_ref)
+
+    for c in censored
+        @views VL[1:m, m+1:2m] .= G1
+        W1 = exp(VL .* c)
+        expTt = @view W1[1:m, 1:m]      # exp(Tᵀc)
+        C1 = @view W1[1:m, m+1:2m]      # C(c; 1)
+
+        a = expTt * α                   # aᵢ = (α' exp(Tc))ᵢ
+        S = sum(a)                      # S(c) = α' exp(Tc) 1
+        S > 0 || continue               # skip numerically-degenerate points
+        loglik += log(S)
+
+        if n == 1
+            Cref = C1
+        else
+            @views VL[1:m, m+1:2m] .= Gref
+            Wref = exp(VL .* c)
+            Cref = @view Wref[1:m, m+1:2m]   # C(c; R_ref)
+        end
+
+        g = negTt \ a                   # g(c) = a(c)(-T)⁻¹
+        sv = expTt' * ones_m            # svᵢ = (exp(Tc) 1)ᵢ
+        ER = expTt' * R                 # ER[i,k] = (exp(Tc) Rₖ)ᵢ
+
+        invS = 1.0 / S
+        @inbounds for i in 1:m
+            B[i] += α[i] * sv[i] * invS
+            for k in 1:n
+                Bk[i, k] += α[i] * ER[i, k] * invS
+            end
+            Z[i] += (C1[i, i] + g[i]) * invS
+            Mi = 0.0                    # Σⱼ Σₖ M̄ᶜᵢⱼₖ, all causes
+            Miref = 0.0                 # Σⱼ M̄ᶜᵢⱼ,ref
+            for j in 1:m
+                i == j && continue
+                Mi += T[i, j] * (C1[i, j] + g[i]) * invS
+                Mijref = T[i, j] * (Cref[i, j] + g[i] * R[j, ref]) * invS
+                Miref += Mijref
+                Mref[i, j] += Mijref
+            end
+            N[i] += Mi + g[i] * dsum[i] * invS
+            Nref[i] += Miref + g[i] * D[i, ref] * invS
         end
     end
 
@@ -185,21 +288,28 @@ struct MAPHEMResult
 end
 
 """
-    _maph_em(α0, T0, D0, data; ref, maxiter=500, tol=1e-7, verbose=false) -> MAPHEMResult
+    _maph_em(α0, T0, D0, data; ref, censored=Float64[], maxiter=500, tol=1e-7,
+             verbose=false) -> MAPHEMResult
 
 Run the approximate EM algorithm for MAPH(α, T, D) from the initial parameters,
-on competing-risks `data` (pairs `(t, k)`). `ref` is the reference absorbing
-cause used by the second parameterization; it must be observed in the data and
+on competing-risks `data` (exact-event pairs `(t, k)`) and the independently
+right-censored times `censored`. `ref` is the reference absorbing cause used by
+the second parameterization; it must be observed among the *events* and
 reachable from every phase of the initial distribution, and is *not* relabeled
 between iterations. Convergence is declared when the absolute change in the
 observed-data log-likelihood drops below `tol` (the relaxed-plus-projected
 M-step does not guarantee monotone increase).
+
+At least one exact event is required — the cause count and the reference cause
+are read off the events — and the M-step divides by the total record count
+`length(data) + length(censored)`.
 """
 function _maph_em(α0::AbstractVector{<:Real}, T0::AbstractMatrix{<:Real},
                   D0::AbstractMatrix{<:Real},
                   data::AbstractVector{<:Tuple{<:Real, <:Integer}};
-                  ref::Int, maxiter::Int=500, tol::Real=1e-7, verbose::Bool=false)
-    length(data) >= 1 || throw(ArgumentError("need at least one observation"))
+                  ref::Int, censored::AbstractVector{<:Real}=Float64[],
+                  maxiter::Int=500, tol::Real=1e-7, verbose::Bool=false)
+    length(data) >= 1 || throw(ArgumentError("need at least one exact-event observation"))
     α = Vector{Float64}(α0)
     T = Matrix{Float64}(T0)
     D = Matrix{Float64}(D0)
@@ -211,9 +321,13 @@ function _maph_em(α0::AbstractVector{<:Real}, T0::AbstractMatrix{<:Real},
         t > 0 || throw(ArgumentError("absorption times must be strictly positive, got $t"))
         1 <= k <= n || throw(ArgumentError("cause index $k out of range 1..$n"))
     end
+    for c in censored
+        c > 0 || throw(ArgumentError("censoring times must be strictly positive, got $c"))
+    end
     any(obs -> obs[2] == ref, data) ||
         throw(ArgumentError("reference cause $ref does not appear in the data"))
-    L = length(data)
+    cens = collect(Float64, censored)
+    L = length(data) + length(cens)
 
     loglik = Float64[]
     converged = false
@@ -222,7 +336,7 @@ function _maph_em(α0::AbstractVector{<:Real}, T0::AbstractMatrix{<:Real},
     prev_ll = -Inf
     smallsteps = 0          # consecutive iterations with |Δ loglik| < tol
     for outer iter in 1:maxiter
-        stats = _maph_estep(α, T, D, data, ref)
+        stats = _maph_estep(α, T, D, data, ref; censored=cens)
         push!(loglik, stats.loglik)
         if verbose
             @info "MAPH EM iteration" iter loglik = stats.loglik Δ = stats.loglik - prev_ll projections = nprojections

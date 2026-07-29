@@ -1,43 +1,61 @@
 # Initialization heuristics for the MAPH EM algorithm, following Appendix C of
-# the paper. Both initializers consume competing-risks data (pairs `(t, k)`)
-# and return a concrete `MAPHDist`.
+# the paper. Both initializers consume competing-risks data (exact-event pairs
+# `(t, k)`, optionally with right-censored times) and return a concrete
+# `MAPHDist`.
 #
-# - `maph_simplified_init`: matches the empirical absorption probabilities π̂
-#   and the overall mean exactly, with *every* parameter strictly positive — a
-#   robust default that satisfies the reachability and positivity requirements
-#   of the EM machinery with no minimum number of phases.
+# - `maph_simplified_init`: matches the observed-event proportions π̂ and the
+#   exposure-per-event scale μ̄ exactly, with *every* parameter strictly
+#   positive — a robust default that satisfies the reachability and positivity
+#   requirements of the EM machinery with no minimum number of phases. It is
+#   the censoring-compatible initialization of Appendix C.
 # - `maph_moment_init`: additionally matches the conditional mean and SCV of
 #   the absorption time, cause by cause, by routing an exponential front end
 #   into per-cause hyper-/hypo-exponential blocks; a small (ε, θ)
-#   regularization restores reachability and strict positivity of α.
+#   regularization restores reachability and strict positivity of α. Under
+#   censoring the raw per-cause event-time moments are biased, so this
+#   initializer then requires externally adjusted targets.
 
 """
-    _maph_cause_statistics(data) -> (n, counts, π̂, μ̂, ĉ²)
+    _maph_cause_statistics(data; censored = Float64[]) -> (n, counts, π̂, μ̂, ĉ², μ̄)
 
-Per-cause empirical statistics: `n` is the largest cause index observed,
-`counts[k]` the number of observations of cause `k`, `π̂[k] = counts[k]/L`,
-`μ̂[k]` the conditional mean and `ĉ²[k]` the conditional squared coefficient of
-variation of the absorption times of cause `k`. A cause with a single
-observation gets `ĉ²[k] = 1.0` (no variance information — treated as
-exponential); a cause with no observations gets `μ̂[k] = ĉ²[k] = NaN` and is
-skipped by the constructions.
+Per-cause empirical statistics of the *observed events*: `n` is the largest
+cause index observed, `counts[k]` the number of events of cause `k`,
+`π̂[k] = counts[k]/d` with `d = length(data)` the event count, `μ̂[k]` the
+conditional mean and `ĉ²[k]` the conditional squared coefficient of variation of
+the event times of cause `k`. A cause with a single event gets `ĉ²[k] = 1.0` (no
+variance information — treated as exponential); a cause with no events gets
+`μ̂[k] = ĉ²[k] = NaN` and is skipped by the constructions.
+
+`μ̄ = (Σℓ yℓ)/d` is the exposure-per-event scale of Appendix C, summing *all*
+observed times (events and censoring times) over the event count. Its reciprocal
+is the all-cause exponential MLE under independent right censoring, and it
+reduces to the ordinary sample mean when every record is an event.
+
+Under censoring `μ̂` and `ĉ²` are biased — they average only the events, which
+are the short times — so they must not be substituted for the conditional
+moments; only `π̂` and `μ̄` are censoring-compatible.
 """
-function _maph_cause_statistics(data::AbstractVector{<:Tuple{<:Real, <:Integer}})
-    isempty(data) && throw(ArgumentError("data must be non-empty"))
+function _maph_cause_statistics(data::AbstractVector{<:Tuple{<:Real, <:Integer}};
+                                censored::AbstractVector{<:Real}=Float64[])
+    isempty(data) && throw(ArgumentError("data must contain at least one exact event"))
     n = 0
     for (t, k) in data
         t > 0 || throw(ArgumentError("absorption times must be strictly positive, got $t"))
         k >= 1 || throw(ArgumentError("cause indices must be >= 1, got $k"))
         n = max(n, Int(k))
     end
-    L = length(data)
+    for c in censored
+        c > 0 || throw(ArgumentError("censoring times must be strictly positive, got $c"))
+    end
+    d = length(data)
     counts = zeros(Int, n)
     sums = zeros(n)
     for (t, k) in data
         counts[k] += 1
         sums[k] += t
     end
-    π̂ = counts ./ L
+    π̂ = counts ./ d
+    μ̄ = (sum(sums) + sum(censored; init=0.0)) / d
     μ̂ = fill(NaN, n)
     ĉ² = fill(NaN, n)
     for k in 1:n
@@ -57,22 +75,27 @@ function _maph_cause_statistics(data::AbstractVector{<:Tuple{<:Real, <:Integer}}
             ĉ²[k] = 1.0
         end
     end
-    return n, counts, π̂, μ̂, ĉ²
+    return n, counts, π̂, μ̂, ĉ², μ̄
 end
 
 """
-    maph_simplified_init(m, data; beta=0.5, jitter=0.5) -> MAPHDist
+    maph_simplified_init(m, data; censored=Float64[], beta=0.5, jitter=0.5) -> MAPHDist
 
 Simplified initialization (Appendix C of the paper): every phase has sojourn
 rate `ω`; after a sojourn the chain moves to another transient phase with
 probability `beta` (uniformly) and absorbs with probability `1 - beta`, into
 cause `k` with probability `π̂ₖ`. Since a geometric sum of i.i.d. exponentials
 is exponential, `τ ~ Exp((1-beta)·ω)` independently of `κ`, and choosing
-`ω = 1/((1-beta)·μ̄)` matches the overall sample mean `μ̄` exactly, while the
-absorption probabilities match `π̂` exactly. All parameters are strictly
-positive (for causes present in the data), so the reachability assumption
-holds and no parameter starts on the boundary. For `m = 1`, `beta` is forced
-to 0 (there is no other phase to route to).
+`ω = 1/((1-beta)·μ̄)` matches the scale `μ̄` exactly, while the absorption
+probabilities match `π̂` exactly. All parameters are strictly positive (for
+causes present in the data), so the reachability assumption holds and no
+parameter starts on the boundary. For `m = 1`, `beta` is forced to 0 (there is
+no other phase to route to).
+
+This is the censoring-compatible initialization: pass the right-censored times
+as `censored` and `π̂`, `μ̄` become the observed-event proportions and the
+exposure-per-event scale of [`_maph_cause_statistics`](@ref), which reduce to
+the sample cause frequencies and the sample mean when nothing is censored.
 
 At `jitter = 0` the construction is exactly as above — but then all phases are
 *exchangeable*, and since the EM update preserves exchangeability, an EM run
@@ -86,13 +109,13 @@ overall mean stays exactly `μ̄`; only the exponential shape of `τ` (and its
 independence of `κ`) becomes approximate.
 """
 function maph_simplified_init(m::Integer, data::AbstractVector{<:Tuple{<:Real, <:Integer}};
+                              censored::AbstractVector{<:Real}=Float64[],
                               beta::Real=0.5, jitter::Real=0.5)
     m >= 1 || throw(ArgumentError("m must be >= 1"))
     0 <= beta < 1 || throw(ArgumentError("beta must be in [0, 1), got $beta"))
     0 <= jitter < 1 || throw(ArgumentError("jitter must be in [0, 1), got $jitter"))
-    n, _, π̂, _, _ = _maph_cause_statistics(data)
+    n, _, π̂, _, _, μ̄ = _maph_cause_statistics(data; censored=censored)
     β = m == 1 ? 0.0 : Float64(beta)
-    μ̄ = Statistics.mean(first.(data))
     ω = 1 / ((1 - β) * μ̄)
 
     α = fill(1.0 / m, m)
@@ -131,8 +154,9 @@ function _maph_omega_threshold(μ̂k::Float64, ĉ²k::Float64)
 end
 
 """
-    maph_moment_init(m, data; omega_factor=10.0, epsilon=0.01, theta=nothing,
-                     beta=0.5) -> MAPHDist
+    maph_moment_init(m, data; censored=Float64[], cond_means=nothing,
+                     cond_scvs=nothing, omega_factor=10.0, epsilon=0.01,
+                     theta=nothing, beta=0.5) -> MAPHDist
 
 Moment-based initialization (Appendix C of the paper). The transient phases
 split into a front end `S₁` (each phase exits after an `Exp(ω)` sojourn) and
@@ -158,26 +182,64 @@ of an `O(epsilon + theta)` perturbation of the matched moments.
 Causes are prioritized for blocks in decreasing order of empirical frequency.
 If not even the most frequent cause fits the budget (`p = 0`, e.g. `m ≤ 2`),
 this falls back to [`maph_simplified_init`](@ref) with routing constant `beta`.
+
+**Right censoring.** The per-cause targets are the *conditional* mean and SCV of
+`τ | κ = k`, and the empirical event-time moments estimate them only when
+nothing is censored — under censoring they see just the short times and are
+biased downwards. Passing a non-empty `censored` therefore requires supplying
+censoring-adjusted or external targets through `cond_means` and `cond_scvs`
+(length-`n` vectors, `NaN` for causes to leave unfitted); otherwise use
+[`maph_simplified_init`](@ref), which is censoring-compatible. The
+exposure-per-event scale from `censored` is still used for the default `theta`.
 """
 function maph_moment_init(m::Integer, data::AbstractVector{<:Tuple{<:Real, <:Integer}};
+                          censored::AbstractVector{<:Real}=Float64[],
+                          cond_means::Union{Nothing, AbstractVector{<:Real}}=nothing,
+                          cond_scvs::Union{Nothing, AbstractVector{<:Real}}=nothing,
                           omega_factor::Real=10.0, epsilon::Real=0.01,
                           theta::Union{Nothing, Real}=nothing, beta::Real=0.5)
     m >= 1 || throw(ArgumentError("m must be >= 1"))
     omega_factor > 1 || throw(ArgumentError("omega_factor must be > 1, got $omega_factor"))
     0 <= epsilon < 1 || throw(ArgumentError("epsilon must be in [0, 1), got $epsilon"))
-    n, counts, π̂, μ̂, ĉ² = _maph_cause_statistics(data)
+    (cond_means === nothing) == (cond_scvs === nothing) || throw(ArgumentError(
+        "supply cond_means and cond_scvs together, or neither"))
+    n, counts, π̂, μ̂, ĉ², μ̄ = _maph_cause_statistics(data; censored=censored)
+    if !isempty(censored) && cond_means === nothing
+        throw(ArgumentError(
+            "the moment initialization needs the conditional mean and SCV of τ | κ = k, " *
+            "which the raw event-time moments do not estimate under right censoring; " *
+            "supply censoring-adjusted targets via cond_means/cond_scvs, or use " *
+            "maph_simplified_init (init_method = :simplified), which is censoring-compatible"))
+    end
+    if cond_means !== nothing
+        length(cond_means) == n || throw(DimensionMismatch(
+            "cond_means must have length $n (the number of causes in the data)"))
+        length(cond_scvs) == n || throw(DimensionMismatch(
+            "cond_scvs must have length $n (the number of causes in the data)"))
+        μ̂ = collect(Float64, cond_means)
+        ĉ² = collect(Float64, cond_scvs)
+        for k in 1:n
+            counts[k] == 0 && continue
+            isnan(μ̂[k]) && continue
+            μ̂[k] > 0 || throw(ArgumentError("cond_means[$k] must be positive, got $(μ̂[k])"))
+            ĉ²[k] > 0 || throw(ArgumentError("cond_scvs[$k] must be positive, got $(ĉ²[k])"))
+        end
+    end
     observed = findall(>(0), counts)
-    μ̄ = Statistics.mean(first.(data))
+    # Causes carrying usable targets get a phase-type block; the rest are still
+    # routed (they are observed), just directly into their absorbing state.
+    targetable = [k for k in observed if !isnan(μ̂[k]) && !isnan(ĉ²[k])]
+    isempty(targetable) && throw(ArgumentError("no cause has usable moment targets"))
     θ = theta === nothing ? 0.01 / μ̄ : Float64(theta)
     θ >= 0 || throw(ArgumentError("theta must be non-negative, got $θ"))
 
-    ω = omega_factor * maximum(_maph_omega_threshold(μ̂[k], ĉ²[k]) for k in observed)
+    ω = omega_factor * maximum(_maph_omega_threshold(μ̂[k], ĉ²[k]) for k in targetable)
 
     # Corrected block targets (Proposition: mean and SCV of ξ + τₖ match the
     # empirical values when the block has mean μₖ and SCV c²ₖ).
     μ = Dict{Int, Float64}()
     c² = Dict{Int, Float64}()
-    for k in observed
+    for k in targetable
         μ[k] = μ̂[k] - 1 / ω
         c²[k] = (ĉ²[k] * (ω * μ[k] + 1)^2 - 1) / (ω * μ[k])^2
         μ[k] > 0 && c²[k] > 0 || error(
@@ -189,8 +251,8 @@ function maph_moment_init(m::Integer, data::AbstractVector{<:Tuple{<:Real, <:Int
     scvtol = 1e-8
     mk = Dict(k => (c²[k] > 1 + scvtol ? 2 :
                     abs(c²[k] - 1) <= scvtol ? 1 :
-                    Int(ceil(1 / c²[k]))) for k in observed)
-    priority = sort(observed; by=k -> π̂[k], rev=true)
+                    Int(ceil(1 / c²[k]))) for k in targetable)
+    priority = sort(targetable; by=k -> π̂[k], rev=true)
     fitted = Int[]
     budget = m - 1
     for k in priority
@@ -198,7 +260,7 @@ function maph_moment_init(m::Integer, data::AbstractVector{<:Tuple{<:Real, <:Int
         push!(fitted, k)
         budget -= mk[k]
     end
-    isempty(fitted) && return maph_simplified_init(m, data; beta=beta)
+    isempty(fitted) && return maph_simplified_init(m, data; censored=censored, beta=beta)
 
     blocks = Dict{Int, Any}()
     for k in fitted

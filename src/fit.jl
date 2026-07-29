@@ -166,8 +166,8 @@ function Distributions.fit_mle(::Type{ErlangPHDist}, data::AbstractVector{<:Real
 end
 
 """
-    fit_mle(MAPHDist, data; m, init, init_method=:moment, maxiter=500, tol=1e-7,
-            verbose=false)
+    fit_mle(MAPHDist, data; m, init, censored=Float64[], init_method=:auto,
+            init_kwargs=(), maxiter=500, tol=1e-7, verbose=false)
 
 Fit a multi-absorbing phase-type distribution to competing-risks observations
 `data` — a vector of pairs `(t, k)` with `t > 0` the absorption time and
@@ -179,13 +179,38 @@ that re-enforces the feasibility constraints whenever the relaxed update leaves
 the valid parameter region.
 
 Provide either the number of transient phases `m` — the starting point is then
-built by [`maph_moment_init`](@ref) (`init_method = :moment`, the default,
-matching per-cause means and SCVs) or [`maph_simplified_init`](@ref)
-(`init_method = :simplified`) — or an explicit `init::MAPHDist`. The number of
-absorbing states is read off the data (the largest cause index observed) unless
-`init` provides more. The reference cause of the second parameterization is the
-most frequent cause in the data; it must be reachable from every phase of the
-starting distribution (both built-in initializers guarantee this).
+built by [`maph_moment_init`](@ref) (`init_method = :moment`, matching per-cause
+means and SCVs) or [`maph_simplified_init`](@ref) (`init_method = :simplified`)
+— or an explicit `init::MAPHDist`. The default `init_method = :auto` picks
+`:moment` for uncensored data and `:simplified` when there is censoring (see
+below). Extra keyword arguments for the chosen initializer go in the named tuple
+`init_kwargs`. The number of absorbing states is read off the data (the largest
+cause index observed) unless `init` provides more. The reference cause of the
+second parameterization is the most frequent *observed event* cause; it must be
+reachable from every phase of the starting distribution (both built-in
+initializers guarantee this).
+
+## Right-censored observations
+
+Pass the right-censoring times as `censored`. A censored record at time `c`
+contributes the observation `{τ > c}` — the subject is known to have survived
+past `c`, and its eventual cause is unobserved — so it adds `log(α exp(Tc) 1)`
+to the log-likelihood and enters the E-step through the cause-resolved censored
+expectations of the paper, which complete the latent path on both sides of `c`
+and spread it fractionally over every possible eventual cause. The censoring is
+assumed independent of `(τ, κ)` and non-informative, so its law contributes no
+MAPH parameters.
+
+```julia
+fit_mle(MAPHDist, events; m = 3, censored = [3.0, 5.5, 2.1])
+```
+
+At least one exact event is required, since the cause count and the reference
+cause are read off the events. Because the per-cause event-time moments are
+biased under censoring, `init_method = :moment` then needs censoring-adjusted
+targets, supplied as `init_kwargs = (cond_means = ..., cond_scvs = ...)`; the
+`:auto` default sidesteps this by using the censoring-compatible
+[`maph_simplified_init`](@ref).
 
 Returns a `MAPHDist`. Because the M-step optimizes a relaxed surrogate followed
 by a projection, the log-likelihood is not guaranteed to increase at every
@@ -197,9 +222,14 @@ through `(α, T, D)` directly.
 function Distributions.fit_mle(::Type{MAPHDist},
                                data::AbstractVector{<:Tuple{<:Real, <:Integer}};
                                m::Union{Integer, Nothing}=nothing, init=nothing,
-                               init_method::Symbol=:moment,
+                               censored::AbstractVector{<:Real}=Float64[],
+                               init_method::Symbol=:auto, init_kwargs::NamedTuple=NamedTuple(),
                                maxiter::Int=500, tol::Real=1e-7, verbose::Bool=false)
-    isempty(data) && throw(ArgumentError("data must be non-empty"))
+    isempty(data) && throw(ArgumentError(
+        "data must contain at least one exact event (censored times go in `censored`)"))
+    for c in censored
+        c > 0 || throw(ArgumentError("censoring times must be strictly positive, got $c"))
+    end
     n = maximum(Int(k) for (_, k) in data)
 
     if init !== nothing
@@ -211,16 +241,23 @@ function Distributions.fit_mle(::Type{MAPHDist},
         d0 = init
     else
         m === nothing && throw(ArgumentError("provide either `m` (number of phases) or `init`"))
-        d0 = if init_method === :moment
-            maph_moment_init(m, data)
-        elseif init_method === :simplified
-            maph_simplified_init(m, data)
+        # Step 1 of the algorithm: the moment initialization needs conditional
+        # per-cause moments, which the event times alone do not estimate under
+        # censoring, so :auto falls back to the censoring-compatible one.
+        method = init_method === :auto ?
+            (isempty(censored) ? :moment : :simplified) : init_method
+        d0 = if method === :moment
+            maph_moment_init(m, data; censored=censored, init_kwargs...)
+        elseif method === :simplified
+            maph_simplified_init(m, data; censored=censored, init_kwargs...)
         else
-            throw(ArgumentError("unknown init_method $(repr(init_method)); use :moment or :simplified"))
+            throw(ArgumentError("unknown init_method $(repr(init_method)); " *
+                                "use :auto, :moment or :simplified"))
         end
     end
 
-    # Reference cause for the second parameterization: the most frequent cause.
+    # Reference cause for the second parameterization: the most frequent cause
+    # among the observed events (censored records have no observed cause).
     counts = zeros(Int, nabsorbing(d0))
     for (_, k) in data
         counts[k] += 1
@@ -229,7 +266,7 @@ function Distributions.fit_mle(::Type{MAPHDist},
 
     res = _maph_em(Vector(initial_prob(d0)), Matrix(subgenerator(d0)),
                    Matrix(exit_rate_matrix(d0)), data;
-                   ref=ref, maxiter=maxiter, tol=tol, verbose=verbose)
+                   ref=ref, censored=censored, maxiter=maxiter, tol=tol, verbose=verbose)
     return MAPHDist(res.α, res.T, res.D)
 end
 
