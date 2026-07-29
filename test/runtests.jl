@@ -297,6 +297,15 @@ const PTDF = PhaseTypeDistributionsFitting
             @test PTDF._project_U!(U1, Rm, 1) == 0
             @test U1 == U
 
+            # A phase from which the reference cause is all but unreachable makes
+            # the constraint ratios R[j,k]/R[j,ref] overflow the solver's finite
+            # range. Fail with an explanation rather than hand HiGHS a program it
+            # will reject with an opaque status code.
+            Rbad = [1e-40 1.0-1e-40; 0.4 0.6; 0.5 0.5]
+            @test_throws ArgumentError PTDF._uconstraints(Rbad, 1)
+            @test_throws ArgumentError PTDF._project_U!(copy(U), Rbad, 1)
+            @test PTDF._uconstraints(Rbad, 2) isa Matrix{Float64}   # fine the other way
+
             # Infeasible row: gets projected onto the polytope.
             U2 = copy(U)
             U2[1, 2] = 5.0
