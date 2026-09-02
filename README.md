@@ -19,17 +19,16 @@ Asanjarani, Nazarathy — in preparation), whose algorithms it implements.
   statistic). Also targets the structured families — `CoxianDist`,
   `HyperExponentialDist`, `HypoExponentialDist`, `ErlangPHDist` — with fits
   that stay in-family and return the specialised type.
-- **MAPH fitting, `fit_mle(MAPHDist, data; m)`** — the approximate EM of the
+- **MAPH fitting, `fit_mle(MAPHDist, data; m)`** — the EM algorithm of the
   accompanying paper for competing-risks observations `(t, k)` (absorption time
-  and cause): exact E-step via Van Loan matrix exponentials, a closed-form
-  *relaxed* M-step in the inference-oriented `(α, q, R, U)` parameterization,
-  and an ℓ1-projection linear program (solved with the open-source
-  [HiGHS](https://highs.dev) solver) that restores feasibility whenever the
-  relaxed update leaves the valid parameter region. Handles independently
+  and cause): exact E-step via Van Loan matrix exponentials and a closed-form
+  M-step in the jump-chain coordinates `(α, q, Pλ, Pμ)`. The M-step is the exact
+  maximizer of the expected complete-data log-likelihood and lands in the
+  parameter set by construction, so the observed-data log-likelihood is
+  non-decreasing and no feasibility projection is needed. Handles independently
   **right-censored** records through a `censored` keyword, using the paper's
-  cause-resolved censored E-step. Includes the two initialization heuristics of
-  the paper (moment-based and simplified), a stopping rule robust to the
-  non-monotone iteration, and a guard against degenerate (non-absorbing)
+  censored E-step. Includes the two initialization heuristics of
+  the paper (moment-based and simplified) and a guard against degenerate (non-absorbing)
   parameter configurations.
 - **`fit(...; method = :mle)`** — a Distributions.jl-style router over the
   estimation methods. (`fit_mm`, moment matching, is reserved and currently a
@@ -128,30 +127,29 @@ separately, as right-censoring times (see below). The number of causes `n` is
 read off the events; the number of phases `m` is the user's model-order choice
 (compare orders by AIC/BIC on the fitted log-likelihoods).
 
-`fit_mle(MAPHDist, data; m)` runs the approximate EM of the paper. Each
-iteration:
+`fit_mle(MAPHDist, data; m)` runs the EM of the paper. Each iteration:
 
 1. **E-step (exact).** For the current `(α, T, D)`, the conditional
    expectations of the complete-data sufficient statistics — starts, sojourn
    times, transition and absorption counts — are computed per observation
    through a single `2m × 2m` Van Loan block-matrix exponential.
-2. **M-step (closed form, relaxed).** The update is taken in an
-   inference-oriented second parameterization `(α, q, R, U)`: phase exit rates
-   `q`, the absorption-probability matrix `R`, and the matrix `U` of
-   conditional jump probabilities given absorption in a *reference* cause
-   (chosen automatically as the most frequent cause in the data). Maximizing a
-   relaxed likelihood gives simple ratio estimators for every component.
-3. **Constraint enforcement.** The relaxed update can leave the feasible
-   region — the converted `D = -T·R` would acquire negative entries. Each
-   violating row of `U` is returned to the feasible polytope by an
-   ℓ1-projection, a small linear program solved with HiGHS.
-4. **Convert back** to `(α, T, D)` — with a structural guard that the
-   recovered chain is genuinely absorbing — and repeat.
+2. **M-step (closed form, exact).** The update is taken in the jump-chain
+   coordinates `(α, q, Pλ, Pμ)`: phase exit rates `q`, the one-step transient
+   jump matrix `Pλ` and the one-step absorption matrix `Pμ`. Every component is
+   a simple ratio of expected statistics, and by the pathwise flow balance each
+   fitted row of `[Pλ | Pμ]` is a probability vector, so the update lands in
+   the parameter set with no feasibility step. No cause plays a distinguished
+   role.
+3. **Convert back** to `(α, T, D)` via `T = Diag(q)(Pλ - I)` and
+   `D = Diag(q)Pμ` — with a structural guard that the recovered chain is
+   genuinely absorbing — and repeat.
 
-Because of the relax-then-project structure, the log-likelihood is not
-monotone along the iterations; convergence is therefore declared only when its
-change stays below `tol` for three consecutive iterations, with `maxiter`
-capping the run (`verbose = true` prints the per-iteration trace).
+The M-step being exact, the iteration is a genuine EM iteration and the
+observed-data log-likelihood is non-decreasing; convergence is declared when
+its increase drops below `tol`, with `maxiter` capping the run
+(`verbose = true` prints the per-iteration trace). The absorption-probability
+matrix `R = -T⁻¹D` is a derived summary of a fit, available through
+`absorption_matrix(T, D)`.
 
 Two built-in starting points are available. `init_method = :moment` (the
 default) constructs an MAPH that matches each cause's empirical probability,

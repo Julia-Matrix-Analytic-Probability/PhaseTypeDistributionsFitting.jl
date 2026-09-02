@@ -172,11 +172,12 @@ end
 Fit a multi-absorbing phase-type distribution to competing-risks observations
 `data` — a vector of pairs `(t, k)` with `t > 0` the absorption time and
 `k ∈ 1..n` the index of the absorbing cause (as returned by
-`rand(::MAPHDist, L)`) — by the approximate EM algorithm of the paper: an exact
-E-step via Van Loan matrix exponentials, a closed-form relaxed M-step in the
-`(α, q, R, U)` parameterization, and an ℓ1-projection linear program (HiGHS)
-that re-enforces the feasibility constraints whenever the relaxed update leaves
-the valid parameter region.
+`rand(::MAPHDist, L)`) — by the EM algorithm of the paper: an exact E-step via
+Van Loan matrix exponentials and a closed-form M-step in the jump-chain
+coordinates `(α, q, Pλ, Pμ)`. The M-step is the exact maximizer of the expected
+complete-data log-likelihood and lands in the parameter set by construction, so
+the observed-data log-likelihood is non-decreasing along the iteration and no
+feasibility step is needed.
 
 Provide either the number of transient phases `m` — the starting point is then
 built by [`maph_moment_init`](@ref) (`init_method = :moment`, matching per-cause
@@ -185,19 +186,17 @@ means and SCVs) or [`maph_simplified_init`](@ref) (`init_method = :simplified`)
 `:moment` for uncensored data and `:simplified` when there is censoring (see
 below). Extra keyword arguments for the chosen initializer go in the named tuple
 `init_kwargs`. The number of absorbing states is read off the data (the largest
-cause index observed) unless `init` provides more. The reference cause of the
-second parameterization is the most frequent *observed event* cause; it must be
-reachable from every phase of the starting distribution (both built-in
-initializers guarantee this).
+cause index observed) unless `init` provides more. No cause plays a
+distinguished role, and no absorption probability is required to be positive.
 
 ## Right-censored observations
 
 Pass the right-censoring times as `censored`. A censored record at time `c`
 contributes the observation `{τ > c}` — the subject is known to have survived
 past `c`, and its eventual cause is unobserved — so it adds `log(α exp(Tc) 1)`
-to the log-likelihood and enters the E-step through the cause-resolved censored
+to the log-likelihood and enters the E-step through the censored
 expectations of the paper, which complete the latent path on both sides of `c`
-and spread it fractionally over every possible eventual cause. The censoring is
+and spread its absorbing jump fractionally over every possible eventual cause. The censoring is
 assumed independent of `(τ, κ)` and non-informative, so its law contributes no
 MAPH parameters.
 
@@ -212,9 +211,9 @@ targets, supplied as `init_kwargs = (cond_means = ..., cond_scvs = ...)`; the
 `:auto` default sidesteps this by using the censoring-compatible
 [`maph_simplified_init`](@ref).
 
-Returns a `MAPHDist`. Because the M-step optimizes a relaxed surrogate followed
-by a projection, the log-likelihood is not guaranteed to increase at every
-iteration; convergence is declared when its change drops below `tol`. MAPH
+Returns a `MAPHDist`. The M-step is exact, so the observed-data log-likelihood
+is non-decreasing along the iteration; convergence is declared when its increase
+drops below `tol`. MAPH
 distributions are not identifiable, so compare fits through distributional
 summaries (absorption probabilities, conditional moments, cdfs) rather than
 through `(α, T, D)` directly.
@@ -256,17 +255,9 @@ function Distributions.fit_mle(::Type{MAPHDist},
         end
     end
 
-    # Reference cause for the second parameterization: the most frequent cause
-    # among the observed events (censored records have no observed cause).
-    counts = zeros(Int, nabsorbing(d0))
-    for (_, k) in data
-        counts[k] += 1
-    end
-    ref = argmax(counts)
-
     res = _maph_em(Vector(initial_prob(d0)), Matrix(subgenerator(d0)),
                    Matrix(exit_rate_matrix(d0)), data;
-                   ref=ref, censored=censored, maxiter=maxiter, tol=tol, verbose=verbose)
+                   censored=censored, maxiter=maxiter, tol=tol, verbose=verbose)
     return MAPHDist(res.α, res.T, res.D)
 end
 

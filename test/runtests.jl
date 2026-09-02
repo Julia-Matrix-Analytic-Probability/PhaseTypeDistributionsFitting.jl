@@ -238,36 +238,33 @@ const PTDF = PhaseTypeDistributionsFitting
             @test_throws ArgumentError fit(MAPHDist, [(1.0, 1), (2.0, 2)]; method = :mm, m = 2)
         end
 
-        @testset "second parameterization round trip" begin
-            for ref in 1:2
-                q, R, U = PTDF._second_parameterization(T_truth, D_truth; ref = ref)
-                @test q ≈ -diag(T_truth)
-                @test all(R .> 0)
-                @test vec(sum(R; dims = 2)) ≈ ones(3)        # rows of R are stochastic
-                @test all(diag(U) .== 0.0)
-                # A valid MAPH satisfies the linear constraints (Prop. in the paper).
-                A = PTDF._uconstraints(R, ref)
-                for i in 1:3
-                    b = R[i, :] ./ R[i, ref]
-                    @test all(A * U[i, :] .<= b .+ 1e-10)
-                end
-                # Converting back recovers the generator parameters exactly.
-                α2, T2, D2 = PTDF._generator_from_second(α_truth, q, R, U; ref = ref)
-                @test α2 ≈ α_truth atol = 1e-14
-                @test T2 ≈ T_truth atol = 1e-12
-                @test D2 ≈ D_truth atol = 1e-12
-            end
+        @testset "jump-coordinate round trip" begin
+            q, Pl, Pm = PTDF._jump_parameters(T_truth, D_truth)
+            @test q ≈ -diag(T_truth)
+            @test all(diag(Pl) .== 0.0)
+            @test vec(sum(Pl; dims = 2)) .+ vec(sum(Pm; dims = 2)) ≈ ones(3)
+            α2, T2, D2 = PTDF._generator_from_jump(α_truth, q, Pl, Pm)
+            @test α2 ≈ α_truth atol = 1e-14
+            @test T2 ≈ T_truth atol = 1e-12
+            @test D2 ≈ D_truth atol = 1e-12
+            R = absorption_matrix(T_truth, D_truth)
+            @test vec(sum(R; dims = 2)) ≈ ones(3)
+            @test all(Pl * R .<= R .+ 1e-12)
         end
+
 
         @testset "E-step identities and quadrature cross-check" begin
             t, k = 1.3, 1
-            stats = PTDF._maph_estep(α_truth, T_truth, D_truth, [(t, k)], k)
+            stats = PTDF._maph_estep(α_truth, T_truth, D_truth, [(t, k)])
             # Exactly one start, total holding time t, exactly one absorbing jump:
             @test sum(stats.B) ≈ 1.0 atol = 1e-12
             @test sum(stats.Z) ≈ t atol = 1e-10
-            # With a single ref-cause observation the ref-restricted stats are the totals.
-            @test stats.N ≈ stats.Nref
-            @test stats.Bk[:, k] ≈ stats.B
+            @test sum(stats.E) ≈ 1.0 atol = 1e-10
+            # All absorbing mass sits on the observed cause, and the row flow
+            # balance ΣM + ΣE = N holds.
+            @test sum(stats.E[:, k]) ≈ sum(stats.E) atol = 1e-14
+            @test vec(sum(stats.M; dims = 2)) .+ vec(sum(stats.E; dims = 2)) ≈ stats.N atol = 1e-10
+
 
             # Cross-check Z̄ and M̄ against direct numerical integration of
             # C[i,j] = ∫₀ᵗ (α'e^{Tu})_i (e^{T(t-u)}D[:,k])_j du.
@@ -283,81 +280,42 @@ const PTDF = PhaseTypeDistributionsFitting
                 if i == j
                     @test stats.Z[i] ≈ Cij / f rtol = 1e-6
                 else
-                    @test stats.Mref[i, j] ≈ T_truth[i, j] * Cij / f rtol = 1e-6
+                    @test stats.M[i, j] ≈ T_truth[i, j] * Cij / f rtol = 1e-6
                 end
             end
         end
 
-        @testset "constraint-enforcement LP" begin
-            q, R, U = PTDF._second_parameterization(T_truth, D_truth; ref = 1)
-            Rm = Matrix(R)
-
-            # Feasible U: projection is a no-op.
-            U1 = copy(U)
-            @test PTDF._project_U!(U1, Rm, 1) == 0
-            @test U1 == U
-
-            # A phase from which the reference cause is all but unreachable makes
-            # the constraint ratios R[j,k]/R[j,ref] overflow the solver's finite
-            # range. Fail with an explanation rather than hand HiGHS a program it
-            # will reject with an opaque status code.
-            Rbad = [1e-40 1.0-1e-40; 0.4 0.6; 0.5 0.5]
-            @test_throws ArgumentError PTDF._uconstraints(Rbad, 1)
-            @test_throws ArgumentError PTDF._project_U!(copy(U), Rbad, 1)
-            @test PTDF._uconstraints(Rbad, 2) isa Matrix{Float64}   # fine the other way
-
-            # Infeasible row: gets projected onto the polytope.
-            U2 = copy(U)
-            U2[1, 2] = 5.0
-            n_proj = PTDF._project_U!(U2, Rm, 1)
-            @test n_proj == 1
-            A = PTDF._uconstraints(Rm, 1)
-            b1 = Rm[1, :] ./ Rm[1, 1]
-            @test all(A * U2[1, :] .<= b1 .+ 1e-7)
-            @test all(U2[1, :] .>= 0)
-            @test U2[1, 1] == 0.0
-            @test U2[2, :] == U[2, :]            # untouched rows stay untouched
-
-            # ℓ1 optimality of the projected row against a brute-force grid over
-            # the two free coordinates (u₁₂, u₁₃).
-            uhat = [0.0, 5.0, 0.3]
-            uproj = PTDF._l1_row_projection(A, copy(b1), uhat, 1)
-            lp_obj = sum(abs.(uproj .- uhat))
-            best = Inf
-            for u12 in range(0, 2; length = 401), u13 in range(0, 2; length = 401)
-                u = [0.0, u12, u13]
-                all(A * u .<= b1 .+ 1e-12) || continue
-                best = min(best, sum(abs.(u .- uhat)))
-            end
-            @test lp_obj <= best + 1e-8           # LP at least as good as the grid
-            @test lp_obj >= best - 0.02           # and the grid confirms it (resolution)
-
-            # The projected parameters convert to a valid generator: D ≥ 0.
-            _, _, D2 = PTDF._generator_from_second(α_truth, q, Rm, U2; ref = 1)
+        @testset "no feasibility step is needed" begin
+            # The M-step output lies in the parameter set by construction: the
+            # flow balance makes each row of [Pλ | Pμ] a probability vector, so
+            # the recovered D is non-negative with no projection.
+            rng = StableRNG(77)
+            data = rand(rng, truth, 400)
+            stats = PTDF._maph_estep(α_truth, T_truth, D_truth, data)
+            qprev, Plprev, Pmprev = PTDF._jump_parameters(T_truth, D_truth)
+            _, q, Pl, Pm = PTDF._maph_mstep(stats, length(data), qprev, Plprev, Pmprev)
+            @test all(Pl .>= 0) && all(Pm .>= 0)
+            @test vec(sum(Pl; dims = 2)) .+ vec(sum(Pm; dims = 2)) ≈ ones(3) atol = 1e-12
+            _, T2, D2 = PTDF._generator_from_jump(α_truth, q, Pl, Pm)
             @test all(D2 .>= 0)
+            @test maximum(abs.(vec(sum(T2; dims = 2)) .+ vec(sum(D2; dims = 2)))) < 1e-10
         end
 
-        @testset "degenerate-face guard" begin
-            # Counterexample from the paper's remark on the conversion proposition:
-            # both rows of R equal and u₁₂ = u₂₁ = 1 satisfy every linear
-            # constraint with equality, yet the recovered chain cycles between
-            # the two phases forever — D = 0 and -T is singular. The conversion
-            # must refuse rather than return an invalid MAPH.
-            a = 0.4
-            R = [a 1-a; a 1-a]
-            U = [0.0 1.0; 1.0 0.0]
+        @testset "absorption-certain guard" begin
+            # A stochastic jump matrix cycles forever: -T is singular, and the
+            # conversion must refuse rather than return an invalid MAPH.
             q = [1.0, 2.0]
             α = [0.5, 0.5]
-            @test_throws ErrorException PTDF._generator_from_second(α, q, R, U; ref = 1)
+            @test_throws ErrorException PTDF._generator_from_jump(
+                α, q, [0.0 1.0; 1.0 0.0], zeros(2, 2))
 
-            # Same tight first row but with an escape route: phase 1 reaches
-            # phase 2, whose constraints are strict, so absorption stays
-            # certain and the conversion goes through.
-            U_ok = [0.0 1.0; 0.0 0.0]
-            α2, T2, D2 = PTDF._generator_from_second(α, q, R, U_ok; ref = 1)
+            # With an escape route to absorption the conversion goes through.
+            α2, T2, D2 = PTDF._generator_from_jump(
+                α, q, [0.0 1.0; 0.0 0.0], [0.0 0.0; 0.6 0.4])
             @test all(D2 .>= 0) && sum(D2[2, :]) > 0
-            @test (-T2) \ D2 ≈ R atol = 1e-12    # R really is the absorption matrix
+            @test vec(sum(absorption_matrix(T2, D2); dims = 2)) ≈ ones(2) atol = 1e-12
         end
+
 
         @testset "simplified initialization matches π̂ and the overall mean" begin
             rng = StableRNG(31)
@@ -478,16 +436,16 @@ const PTDF = PhaseTypeDistributionsFitting
             end
         end
 
-        @testset "EM internals: trace, convergence, projection counter" begin
+        @testset "EM internals: trace, monotone ascent, convergence" begin
             rng = StableRNG(35)
             data = rand(rng, truth, 600)
             d0 = PTDF.maph_moment_init(3, data)
             res = PTDF._maph_em(Vector(initial_prob(d0)), Matrix(subgenerator(d0)),
                                 Matrix(exit_rate_matrix(d0)), data;
-                                ref = 1, maxiter = 200, tol = 1e-8)
+                                maxiter = 200, tol = 1e-8)
             @test all(isfinite, res.loglik)
             @test res.loglik[end] >= res.loglik[1]       # improves overall
-            @test res.nprojections >= 0
+            @test all(diff(res.loglik) .>= -1e-9)   # exact M-step: monotone
             @test res.iterations <= 200
             # The result is a valid MAPH parameterization.
             @test isapprox(sum(res.α), 1.0; atol = 1e-10)
@@ -507,7 +465,7 @@ const PTDF = PhaseTypeDistributionsFitting
             D0 = [1.0 0.5;
                   0.9 0.9;
                   1.2 0.8]
-            res = PTDF._maph_em(α0, T0, D0, data; ref = 1, maxiter = 20, tol = 0.0)
+            res = PTDF._maph_em(α0, T0, D0, data; maxiter = 20, tol = 0.0)
             @test res.α[3] == 0.0
             @test res.T[2, 1] == 0.0
             @test res.T[3, 1] == 0.0
@@ -546,8 +504,8 @@ const PTDF = PhaseTypeDistributionsFitting
             noevents = Tuple{Float64, Int}[]
 
             @testset "E-step against direct tail integration" begin
-                c, ref = 0.8, 1
-                sc = PTDF._maph_estep(α_truth, T_truth, D_truth, noevents, ref;
+                c = 0.8
+                sc = PTDF._maph_estep(α_truth, T_truth, D_truth, noevents;
                                       censored = [c])
 
                 # The censored expectations are the exact-event ones averaged
@@ -558,43 +516,38 @@ const PTDF = PhaseTypeDistributionsFitting
                 ts = range(c, tmax; length = npts)
                 h = step(ts)
                 S = surv(c)
-                B = zeros(3); Bk = zeros(3, 2); Z = zeros(3); N = zeros(3)
-                Mref = zeros(3, 3); Nref = zeros(3)
+                B = zeros(3); Z = zeros(3); N = zeros(3)
+                M = zeros(3, 3); E = zeros(3, 2)
                 for (s, t) in enumerate(ts), k in 1:2
                     f = pdf(truth, t, k)
                     f > 0 || continue
-                    st = PTDF._maph_estep(α_truth, T_truth, D_truth, [(t, k)], ref)
+                    st = PTDF._maph_estep(α_truth, T_truth, D_truth, [(t, k)])
                     w = (s == 1 || s == npts ? 0.5h : h) * f      # trapezoid
                     B .+= w .* st.B
-                    Bk[:, k] .+= w .* st.B
                     Z .+= w .* st.Z
                     N .+= w .* st.N
-                    if k == ref
-                        Mref .+= w .* st.Mref
-                        Nref .+= w .* st.Nref
-                    end
+                    M .+= w .* st.M
+                    E .+= w .* st.E
                 end
 
                 @test sc.loglik ≈ log(S) atol = 1e-12
                 @test sc.B ≈ B ./ S atol = 1e-5
-                @test sc.Bk ≈ Bk ./ S atol = 1e-5
                 @test sc.Z ≈ Z ./ S atol = 1e-5
                 @test sc.N ≈ N ./ S atol = 1e-5
-                @test sc.Mref ≈ Mref ./ S atol = 1e-5
-                @test sc.Nref ≈ Nref ./ S atol = 1e-5
+                @test sc.M ≈ M ./ S atol = 1e-5
+                @test sc.E ≈ E ./ S atol = 1e-5
             end
 
             @testset "structural identities" begin
-                for c in [0.05, 0.8, 4.0], ref in 1:2
-                    sc = PTDF._maph_estep(α_truth, T_truth, D_truth, noevents, ref;
+                for c in [0.05, 0.8, 4.0]
+                    sc = PTDF._maph_estep(α_truth, T_truth, D_truth, noevents;
                                           censored = [c])
-                    # Every completed path starts somewhere and has exactly one
-                    # eventual cause: Σₖ B̄ᶜᵢₖ = B̄ᶜᵢ and Σᵢ B̄ᶜᵢ = 1.
-                    @test vec(sum(sc.Bk; dims = 2)) ≈ sc.B atol = 1e-12
+                    # Every completed path starts somewhere and is absorbed once.
                     @test sum(sc.B) ≈ 1.0 atol = 1e-12
-                    # The reference slice never exceeds the all-cause total.
-                    @test all(sc.Nref .<= sc.N .+ 1e-12)
-                    @test all(sc.Z .>= 0) && all(sc.Mref .>= 0)
+                    @test sum(sc.E) ≈ 1.0 atol = 1e-10
+                    # Row flow balance ΣM + ΣE = N.
+                    @test vec(sum(sc.M; dims = 2)) .+ vec(sum(sc.E; dims = 2)) ≈ sc.N atol = 1e-10
+                    @test all(sc.Z .>= 0) && all(sc.M .>= 0) && all(sc.E .>= 0)
                     # A censored path is still alive at c, so it has occupied
                     # the transient phases for at least c.
                     @test sum(sc.Z) >= c - 1e-10
@@ -602,41 +555,40 @@ const PTDF = PhaseTypeDistributionsFitting
             end
 
             @testset "c → 0 reduces to unconditional expectations" begin
-                sc = PTDF._maph_estep(α_truth, T_truth, D_truth, noevents, 1;
+                sc = PTDF._maph_estep(α_truth, T_truth, D_truth, noevents;
                                       censored = [1e-9])
                 @test sc.B ≈ α_truth atol = 1e-8
-                @test sc.Bk ≈ α_truth .* R_truth atol = 1e-8
                 @test sc.Z ≈ vec((-T_truth)' \ α_truth) atol = 1e-8   # α(-T)⁻¹
+                # Σᵢ E[Eᵢₖ] is the unconditional cause distribution α R.
+                @test vec(sum(sc.E; dims = 1)) ≈ vec(α_truth' * R_truth) atol = 1e-8
                 @test sc.loglik ≈ 0.0 atol = 1e-8                     # S(0) = 1
             end
 
             @testset "n = 1 collapses to the marginal PH survival" begin
-                # With a single cause the censored E-step needs one exponential,
-                # and its statistics are the classical right-censored PH ones.
+                # With a single cause the statistics are the classical
+                # right-censored PH ones.
                 ph = MAPHDist(HyperExponentialDist([0.6, 0.4], [1.0, 0.25]))
                 αp = Vector(initial_prob(ph)); Tp = Matrix(subgenerator(ph))
                 Dp = Matrix(exit_rate_matrix(ph))
                 c = 1.7
-                sc = PTDF._maph_estep(αp, Tp, Dp, noevents, 1; censored = [c])
+                sc = PTDF._maph_estep(αp, Tp, Dp, noevents; censored = [c])
                 Sp = only(αp' * exp(Tp * c) * ones(2))
                 @test sc.loglik ≈ log(Sp) atol = 1e-12
-                @test sc.Bk[:, 1] ≈ sc.B atol = 1e-12       # all mass on cause 1
-                @test sc.Nref ≈ sc.N atol = 1e-12
-                # Ē + M̄ balance: N̄ᵢ = Σⱼ M̄ᵢⱼ + Ēᵢ, and exactly one absorbing
-                # jump happens on every completed path.
+                @test sum(sc.E) ≈ 1.0 atol = 1e-12          # one absorbing jump
                 a = vec(exp(Tp * c)' * αp)
                 g = (-Tp)' \ a
-                @test sum(g .* vec(sum(Dp; dims = 2))) / Sp ≈ 1.0 atol = 1e-12
+                @test sc.E[:, 1] ≈ g .* vec(sum(Dp; dims = 2)) ./ Sp atol = 1e-12
             end
+
 
             @testset "an empty `censored` changes nothing" begin
                 rng = StableRNG(41)
                 data = rand(rng, truth, 300)
-                s1 = PTDF._maph_estep(α_truth, T_truth, D_truth, data, 1)
-                s2 = PTDF._maph_estep(α_truth, T_truth, D_truth, data, 1;
+                s1 = PTDF._maph_estep(α_truth, T_truth, D_truth, data)
+                s2 = PTDF._maph_estep(α_truth, T_truth, D_truth, data;
                                       censored = Float64[])
-                @test s1.B == s2.B && s1.Bk == s2.Bk && s1.Z == s2.Z
-                @test s1.N == s2.N && s1.Mref == s2.Mref && s1.Nref == s2.Nref
+                @test s1.B == s2.B && s1.Z == s2.Z && s1.M == s2.M
+                @test s1.N == s2.N && s1.E == s2.E
                 @test s1.loglik == s2.loglik
                 f1 = fit_mle(MAPHDist, data; m = 3, maxiter = 30)
                 f2 = fit_mle(MAPHDist, data; m = 3, maxiter = 30, censored = Float64[])
@@ -650,7 +602,7 @@ const PTDF = PhaseTypeDistributionsFitting
                 d0 = PTDF.maph_simplified_init(3, data; censored = cens)
                 res = PTDF._maph_em(Vector(initial_prob(d0)), Matrix(subgenerator(d0)),
                                     Matrix(exit_rate_matrix(d0)), data;
-                                    ref = 1, censored = cens, maxiter = 25, tol = 1e-9)
+                                    censored = cens, maxiter = 25, tol = 1e-9)
                 expected = maph_loglik(d0, data) +
                            sum(log(only(Vector(initial_prob(d0))' *
                                         exp(Matrix(subgenerator(d0)) * c) * ones(3)))
@@ -739,7 +691,7 @@ const PTDF = PhaseTypeDistributionsFitting
                 @test_throws ArgumentError fit_mle(MAPHDist, Tuple{Float64, Int}[];
                                                    m = 2, censored = [1.0, 2.0])
                 @test_throws ArgumentError PTDF._maph_em(α_truth, T_truth, D_truth, data;
-                                                          ref = 1, censored = [-0.5])
+                                                          censored = [-0.5])
                 @test_throws ArgumentError PTDF.maph_simplified_init(2, data;
                                                                      censored = [0.0])
             end
