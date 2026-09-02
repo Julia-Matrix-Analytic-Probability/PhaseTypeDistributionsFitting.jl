@@ -285,6 +285,41 @@ const PTDF = PhaseTypeDistributionsFitting
             end
         end
 
+        @testset "Fisher identity: observed score = E[complete score | D]" begin
+            # d/dθ log p(D | θ) = E[ d/dθ log L(θ) | D ] at the same θ.
+            # Differentiate along q₁, holding the jump probabilities of row 1
+            # fixed; the complete-data score in that direction is N₁/q₁ - Z₁,
+            # assembled from the E-step statistics alone.
+            rng = StableRNG(4242)
+            data = rand(rng, truth, 800)
+            cens = [0.10 + 0.40 * rand(rng) for _ in 1:150]
+            q0, Pl, Pm = PTDF._jump_parameters(T_truth, D_truth)
+
+            function lobs(q1)
+                q = copy(q0); q[1] = q1
+                _, Tq, Dq = PTDF._generator_from_jump(α_truth, q, Pl, Pm)
+                d = MAPHDist(α_truth, Tq, Dq)
+                sum(log(pdf(d, t, k)) for (t, k) in data) +
+                    sum(log(only(α_truth' * exp(Tq * c) * ones(3))) for c in cens)
+            end
+
+            h = 1e-5
+            numeric = (lobs(q0[1] + h) - lobs(q0[1] - h)) / (2h)
+            st = PTDF._maph_estep(α_truth, T_truth, D_truth, data; censored = cens)
+            fisher = st.N[1] / q0[1] - st.Z[1]
+            @test isapprox(numeric, fisher; rtol = 1e-5)
+
+            # At a fixed point of the EM map the M-step reproduces its input,
+            # q = N/Z, so the observed score in this direction vanishes. The
+            # residual is measured relative to Z, which carries the sample size.
+            res = PTDF._maph_em(α_truth, T_truth, D_truth, data;
+                                censored = cens, maxiter = 3000, tol = 1e-12)
+            stf = PTDF._maph_estep(res.α, res.T, res.D, data; censored = cens)
+            qf = -diag(res.T)
+            @test maximum(abs.(stf.N ./ qf .- stf.Z) ./ stf.Z) < 1e-4
+        end
+
+
         @testset "no feasibility step is needed" begin
             # The M-step output lies in the parameter set by construction: the
             # flow balance makes each row of [Pλ | Pμ] a probability vector, so
