@@ -396,7 +396,7 @@ const PTDF = PhaseTypeDistributionsFitting
             π̂ = [count(o -> o[2] == k, data) / L for k in 1:2]
 
             # Unregularized: matching is exact (Proposition in Appendix C).
-            d0 = PTDF.maph_moment_init(8, data; epsilon = 0.0, theta = 0.0)
+            d0 = PTDF.maph_moment_init(8, data; epsilon = 0.0, theta = 0.0, densify = 0.0)
             @test nphases(d0) == 8
             @test marginal_absorption(d0) ≈ π̂ atol = 1e-10
             for k in 1:2
@@ -413,6 +413,11 @@ const PTDF = PhaseTypeDistributionsFitting
             dreg = PTDF.maph_moment_init(8, data)
             @test all(Vector(initial_prob(dreg)) .> 0)
             @test all(Matrix(absorption_probs(dreg)) .> 0)
+            # Densified: every off-diagonal entry of T and every entry of D is
+            # positive, so the zero-preserving EM can reach the full model.
+            Treg = Matrix(subgenerator(dreg)); Dreg = Matrix(exit_rate_matrix(dreg))
+            @test all(Treg[i, j] > 0 for i in 1:8, j in 1:8 if i != j)
+            @test all(Dreg .> 0)
             @test marginal_absorption(dreg) ≈ π̂ rtol = 0.05
             for k in 1:2
                 times = [t for (t, kk) in data if kk == k]

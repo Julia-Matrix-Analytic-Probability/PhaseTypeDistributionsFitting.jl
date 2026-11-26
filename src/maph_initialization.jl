@@ -10,8 +10,8 @@
 #   the censoring-compatible initialization of Appendix C.
 # - `maph_moment_init`: additionally matches the conditional mean and SCV of
 #   the absorption time, cause by cause, by routing an exponential front end
-#   into per-cause hyper-/hypo-exponential blocks; a small (ε, θ)
-#   regularization restores reachability and strict positivity of α. Under
+#   into per-cause hyper-/hypo-exponential blocks; a small regularization
+#   makes every entry of α and D and every off-diagonal entry of T positive. Under
 #   censoring the raw per-cause event-time moments are biased, so this
 #   initializer then requires externally adjusted targets.
 
@@ -156,7 +156,7 @@ end
 """
     maph_moment_init(m, data; censored=Float64[], cond_means=nothing,
                      cond_scvs=nothing, omega_factor=10.0, epsilon=0.01,
-                     theta=nothing, beta=0.5) -> MAPHDist
+                     theta=0.0, densify=0.01, beta=0.5) -> MAPHDist
 
 Moment-based initialization (Appendix C of the paper). The transient phases
 split into a front end `S₁` (each phase exits after an `Exp(ω)` sojourn) and
@@ -164,7 +164,7 @@ per-cause phase-type blocks: leaving `S₁`, the chain routes into the block of
 cause `k` — a two-phase hyper-exponential (`c²ₖ > 1`), a hypo-exponential
 (`c²ₖ < 1`) or a single exponential (`c²ₖ ≈ 1`), built by the corresponding
 `PhaseTypeDistributions` constructors — or, for causes the phase budget cannot
-accommodate, directly into the absorbing state. At `epsilon = theta = 0` the
+accommodate, directly into the absorbing state. At `epsilon = densify = 0` the
 construction matches the empirical absorption probabilities exactly, and the
 conditional mean and SCV of every block-fitted cause exactly.
 
@@ -172,12 +172,17 @@ conditional mean and SCV of every block-fitted cause exactly.
 guarantees the corrected block targets are valid. Larger factors shrink the
 front end's share `1/ω` of each conditional mean, keeping the construction
 closer to the exact per-cause moment match (empirically a better EM starting
-point), at the price of a stiffer generator in the E-step matrix exponentials. The `(epsilon, theta)`
-regularization mixes `epsilon` of a uniform distribution into `α` and adds a
-total feedback rate `theta` from every block phase to the front end (default
-`0.01/μ̄`), making every phase carry positive initial mass and every absorbing
-state reachable from every phase — as the EM machinery requires — at the cost
-of an `O(epsilon + theta)` perturbation of the matched moments.
+point), at the price of a stiffer generator in the E-step matrix exponentials.
+
+The construction is sparse, and the EM preserves zeros, so started there it
+would stay in that sparse class. Two regularizations remove the zeros:
+`epsilon` mixes a uniform distribution into `α`, and `densify` mixes every row
+of the embedded jump chain with the uniform distribution over the other phases
+and the causes (keeping each phase's exit rate). After this every entry of `α`
+and `D` and every off-diagonal entry of `T` is positive, so the EM can reach
+the full model. The cost is an `O(epsilon + densify)` perturbation of the
+matched moments. The optional `theta` (default `0`) additionally adds a total
+feedback rate `theta` from every block phase to the front end.
 
 Causes are prioritized for blocks in decreasing order of empirical frequency.
 If not even the most frequent cause fits the budget (`p = 0`, e.g. `m ≤ 2`),
@@ -190,15 +195,17 @@ biased downwards. Passing a non-empty `censored` therefore requires supplying
 censoring-adjusted or external targets through `cond_means` and `cond_scvs`
 (length-`n` vectors, `NaN` for causes to leave unfitted); otherwise use
 [`maph_simplified_init`](@ref), which is censoring-compatible. The
-exposure-per-event scale from `censored` is still used for the default `theta`.
+exposure-per-event scale from `censored` is still used for the scale.
 """
 function maph_moment_init(m::Integer, data::AbstractVector{<:Tuple{<:Real, <:Integer}};
                           censored::AbstractVector{<:Real}=Float64[],
                           cond_means::Union{Nothing, AbstractVector{<:Real}}=nothing,
                           cond_scvs::Union{Nothing, AbstractVector{<:Real}}=nothing,
                           omega_factor::Real=10.0, epsilon::Real=0.01,
-                          theta::Union{Nothing, Real}=nothing, beta::Real=0.5)
+                          theta::Union{Nothing, Real}=0.0, densify::Real=0.01,
+                          beta::Real=0.5)
     m >= 1 || throw(ArgumentError("m must be >= 1"))
+    0 <= densify < 1 || throw(ArgumentError("densify must be in [0, 1), got $densify"))
     omega_factor > 1 || throw(ArgumentError("omega_factor must be > 1, got $omega_factor"))
     0 <= epsilon < 1 || throw(ArgumentError("epsilon must be in [0, 1), got $epsilon"))
     (cond_means === nothing) == (cond_scvs === nothing) || throw(ArgumentError(
@@ -310,6 +317,25 @@ function maph_moment_init(m::Integer, data::AbstractVector{<:Tuple{<:Real, <:Int
             T[r, i] += θ / m₁
         end
         T[r, r] -= θ
+    end
+
+    # Densification. The EM preserves zeros, so a sparse start would confine the
+    # fit to the sparse class of the construction. Mix every row of the embedded
+    # jump chain [Pλ | Pμ] with the uniform distribution over the m-1 other
+    # phases and the n causes, with weight `densify`, keeping each phase's exit
+    # rate. Every off-diagonal entry of T and every entry of D become positive.
+    if densify > 0
+        for i in 1:m
+            q = -T[i, i]
+            u = densify * q / (m - 1 + n)
+            for j in 1:m
+                j == i && continue
+                T[i, j] = (1 - densify) * T[i, j] + u
+            end
+            for k in 1:n
+                D[i, k] = (1 - densify) * D[i, k] + u
+            end
+        end
     end
 
     return MAPHDist(α, T, D)
